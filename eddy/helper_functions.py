@@ -354,50 +354,163 @@ def get_p0_gaussian(x, y):
 # -- MODEL FUNCTIONS --#
 
 def gaussian(x, x0, dV, Tb):
-    """Gaussian function."""
+    """
+    Gaussian line profile.
+
+    Args:
+        x (array): Velocity axis in [m/s].
+        x0 (float): Line center in [m/s].
+        dV (float): Doppler linewidth in [m/s].
+        Tb (float): Peak brightness temperature in [K].
+
+    Returns:
+        profile (array): Gaussian line profile evaluated at ``x``.
+    """
     return Tb * np.exp(-np.power((x - x0) / dV, 2.0))
 
 
 def gaussian_thick(x, x0, dV, Tex, tau0):
-    """Optically thick Gaussian line."""
+    """
+    Optically thick Gaussian line profile.
+
+    Args:
+        x (array): Velocity axis in [m/s].
+        x0 (float): Line center in [m/s].
+        dV (float): Doppler linewidth in [m/s].
+        Tex (float): Excitation temperature in [K].
+        tau0 (float): Peak optical depth.
+
+    Returns:
+        profile (array): Optically thick line profile evaluated at ``x``.
+    """
     tau = gaussian(x, x0, dV, tau0)
     return Tex * (1. - np.exp(-tau))
 
 
 def double_gaussian_sum(x, x0, dV0, Tb0, x1, dV1, Tb1):
-    """Double Gaussian profile as sum of two Gaussians."""
+    """
+    Double Gaussian profile as the sum of two Gaussian components.
+
+    Args:
+        x (array): Velocity axis in [m/s].
+        x0 (float): Line center of first component in [m/s].
+        dV0 (float): Linewidth of first component in [m/s].
+        Tb0 (float): Peak brightness of first component in [K].
+        x1 (float): Line center of second component in [m/s].
+        dV1 (float): Linewidth of second component in [m/s].
+        Tb1 (float): Peak brightness of second component in [K].
+
+    Returns:
+        profile (array): Summed double Gaussian profile evaluated at ``x``.
+    """
     return gaussian(x, x0, dV0, Tb0) + gaussian(x, x1, dV1, Tb1)
 
 
 def double_gaussian_max(x, x0, dV0, Tb0, x1, dV1, Tb1):
-    """Double Gaussian profile as the max of two Gaussian components."""
+    """
+    Double Gaussian profile as the element-wise maximum of two Gaussian
+    components. Used to model optically thick emission from two surfaces.
+
+    Args:
+        x (array): Velocity axis in [m/s].
+        x0 (float): Line center of first component in [m/s].
+        dV0 (float): Linewidth of first component in [m/s].
+        Tb0 (float): Peak brightness of first component in [K].
+        x1 (float): Line center of second component in [m/s].
+        dV1 (float): Linewidth of second component in [m/s].
+        Tb1 (float): Peak brightness of second component in [K].
+
+    Returns:
+        profile (array): Maximum double Gaussian profile evaluated at ``x``.
+    """
     return np.max([gaussian(x, x0, dV0, Tb0),
                    gaussian(x, x1, dV1, Tb1)], axis=0)
 
 
 def double_gaussian_sum_fixeddV(x, x0, dV, Tb0, x1, Tb1):
-    """Double Gaussian profile as the sum of two Gaussians with same dV."""
+    """
+    Double Gaussian profile as the sum of two Gaussians sharing a common
+    linewidth.
+
+    Args:
+        x (array): Velocity axis in [m/s].
+        x0 (float): Line center of first component in [m/s].
+        dV (float): Shared Doppler linewidth in [m/s].
+        Tb0 (float): Peak brightness of first component in [K].
+        x1 (float): Line center of second component in [m/s].
+        Tb1 (float): Peak brightness of second component in [K].
+
+    Returns:
+        profile (array): Summed double Gaussian profile evaluated at ``x``.
+    """
     return gaussian(x, x0, dV, Tb0) + gaussian(x, x1, dV, Tb1)
 
 
 def double_gaussian_max_fixeddV(x, x0, dV, Tb0, x1, Tb1):
-    """Double Gaussian profile as the max of two Gaussian components."""
+    """
+    Double Gaussian profile as the element-wise maximum of two Gaussians
+    sharing a common linewidth.
+
+    Args:
+        x (array): Velocity axis in [m/s].
+        x0 (float): Line center of first component in [m/s].
+        dV (float): Shared Doppler linewidth in [m/s].
+        Tb0 (float): Peak brightness of first component in [K].
+        x1 (float): Line center of second component in [m/s].
+        Tb1 (float): Peak brightness of second component in [K].
+
+    Returns:
+        profile (array): Maximum double Gaussian profile evaluated at ``x``.
+    """
     return np.max([gaussian(x, x0, dV, Tb0),
                    gaussian(x, x1, dV, Tb1)], axis=0)
 
 
 def SHO(x, A, C):
-    """Simple harmonic oscillator."""
+    """
+    Simple harmonic oscillator model: ``A * cos(x) + C``.
+
+    Args:
+        x (array): Polar angle in [rad].
+        A (float): Amplitude of the cosine term.
+        C (float): Constant offset.
+
+    Returns:
+        y (array): Model evaluated at ``x``.
+    """
     return A * np.cos(x) + C
 
 
 def SHO_offset(x, A, B, C):
-    """Simple harmonic oscillator with offset."""
+    """
+    Simple harmonic oscillator with a phase offset: ``A * cos(x + B) + C``.
+
+    Args:
+        x (array): Polar angle in [rad].
+        A (float): Amplitude of the cosine term.
+        B (float): Phase offset in [rad].
+        C (float): Constant offset.
+
+    Returns:
+        y (array): Model evaluated at ``x``.
+    """
     return A * np.cos(x + B) + C
 
 
 def SHO_double(x, A, B, C):
-    """Two orthogonal simple harmonic oscillators."""
+    """
+    Two orthogonal simple harmonic oscillators: ``A * cos(x) + B * sin(x) + C``.
+    Used to simultaneously describe rotational and radial velocity components.
+
+    Args:
+        x (array): Polar angle in [rad].
+        A (float): Amplitude of the cosine (rotational) term.
+        B (float): Amplitude of the sine (radial) term.
+        C (float): Constant offset (systemic velocity contribution).
+
+    Returns:
+        y (array): Model evaluated at ``x``.
+    """
     return A * np.cos(x) + B * np.sin(x) + C
 
 
@@ -405,11 +518,17 @@ def SHO_double(x, A, B, C):
 
 def plot_walkers(samples, nburnin=None, labels=None, histogram=True):
     """
-    Plot the walkers to check if they are burning in.
+    Plot the MCMC walker chains to check convergence and burn-in.
 
     Args:
-        samples (ndarray):
-        nburnin (Optional[int])
+        samples (ndarray): Array of shape ``[ndim, nwalkers, nsteps]``
+            containing the walker chains.
+        nburnin (Optional[int]): Number of burn-in steps. If provided, a
+            vertical dashed line is drawn to mark the end of burn-in.
+        labels (Optional[list]): Parameter labels for the y-axes. Must have
+            length equal to ``samples.shape[0]``.
+        histogram (Optional[bool]): If ``True``, append a histogram of the
+            post-burn-in samples to each walker plot. Default is ``True``.
     """
 
     # Check the length of the label list.
@@ -455,12 +574,14 @@ def plot_walkers(samples, nburnin=None, labels=None, histogram=True):
 
 def plot_corner(samples, labels=None, quantiles=[0.16, 0.5, 0.84]):
     """
-    A wrapper for DFM's corner plots.
+    A wrapper for corner plots of MCMC posterior samples.
 
     Args:
-        samples (ndarry):
-        labels (Optional[list]):
-        quantiles (Optional[list]): Quantiles to use for plotting.
+        samples (ndarray): Array of shape ``[nsamples, ndim]`` of posterior
+            samples.
+        labels (Optional[list]): Parameter labels for each dimension.
+        quantiles (Optional[list]): Quantiles to mark on the marginalised
+            posterior distributions. Default is ``[0.16, 0.5, 0.84]``.
     """
     import corner
     corner.corner(samples, labels=labels, title_fmt='.4f', bins=30,

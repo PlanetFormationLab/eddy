@@ -130,6 +130,7 @@ class annulus(object):
 
     @property
     def extent_grid(self, degrees=True):
+        """Extent of the [velax, theta] grid used for plotting."""
         if degrees:
             return [self.velax_grid[0], self.velax_grid[-1],
                     np.degrees(self.theta_grid[0]),
@@ -639,7 +640,7 @@ class annulus(object):
 
     @staticmethod
     def _randomize_p0(p0, nwalkers, scatter):
-        """Estimate (vrot, noise, lnp, lns) for the spectrum."""
+        """Randomize starting positions p0 for nwalkers around p0 with scatter."""
         dp0 = np.random.randn(nwalkers * len(p0)).reshape(nwalkers, len(p0))
         dp0 = np.where(p0 == 0.0, 1.0, p0)[None, :] * (1.0 + scatter * dp0)
         return np.where(p0[None, :] == 0.0, dp0 - 1.0, dp0)
@@ -1076,8 +1077,9 @@ class annulus(object):
             vrad (optional[float]): Disk-frame radial velocity in [m/s].
             vlsr (optional[float]): Systemtic velocity in [m/s].
 
-        Returns
-            Array of projected line of sight velocities at each polar angle.
+        Returns:
+            ndarray: Array of projected line of sight velocities in [m/s] at
+                each polar angle.
         """
         vrot_proj = vrot * np.cos(self.theta) * np.sin(abs(self.inc_rad))
         vrad_proj = -vrad * np.sin(self.theta) * np.sin(self.inc_rad)
@@ -1529,12 +1531,21 @@ class annulus(object):
         velocity mask to see how that affects the spectra.
 
         Args:
-            ax (Optional): Matplotlib axis onto which the data will be plotted.
-            return_fig (Optional[bool]): Return the figure.
-            step_kwargs (Optional[dict])
+            ax (optional[matplotlib axis]): Axis onto which the data will be
+                plotted. If ``None``, a new figure will be created.
+            return_fig (optional[bool]): Whether to return the figure. Default
+                is ``False``.
+            step_kwargs (optional[dict]): Kwargs to pass to ``matplotlib.step``.
+            vrot_mask (optional[float]): Disk-frame rotational velocity used for
+                the mask in [m/s].
+            vlsr_mask (optional[float]): Systemic velocity used for the mask in
+                [m/s].
+            vrad_mask (optional[float]): Disk-frame radial velocity used for the
+                mask in [m/s].
+            dv_mask (optional[float]): Half-width of the mask in [m/s].
 
-        Returns
-            Figure with the attached spectra plotted.
+        Returns:
+            fig (matplotlib figure): Returned if ``return_fig=True``.
         """
         if ax is None:
             fig, ax = plt.subplots(figsize=(5.0, 3.1), constrained_layout=True)
@@ -1661,25 +1672,30 @@ class annulus(object):
         This is a nice way to search for structure within the data.
 
         Args:
-            vrot (Optional[float]): Rotational velocity used to deprojected the
-                spectra. If none is provided, no deprojection is used.
-            vrad (Optional[float]): Radial velocity used to deproject the
-                spectra.
-            residual (Optional[bool]): If true, subtract the azimuthally
-                averaged line profile.
-            method (Optional[str]): Interpolation method for ``griddata``.
-            vrot_mask (Optional[float]):
-            vlsr_mask (Optional[float]):
-            vrad_mask (Optional[float]):
-            dv_mask (Optional[float]):
-            mJy (Optional[float]): Whether to plot in units of mJy/beam or
-                Jy/beam. Default is mJy/beam.
-            tgrid (Optional[ndarray]): Theta grid in [rad] used for gridding
-                the data. By default this spans ``-pi`` to ``pi``.
-            return_fig (Optional[bool]): Whether to return the figure axes.
+            vrot (optional[float]): Rotational velocity in [m/s] used to
+                deproject the spectra. If ``None``, no deprojection is applied.
+            vrad (optional[float]): Radial velocity in [m/s] used to deproject
+                the spectra. Default is ``0.0``.
+            residual (optional[bool]): If ``True``, subtract the azimuthally
+                averaged line profile before plotting. Default is ``False``.
+            method (optional[str]): Interpolation method passed to
+                ``scipy.interpolate.griddata``. Default is ``'nearest'``.
+            vrot_mask (optional[float]): Disk-frame rotational velocity in
+                [m/s] used to overlay a velocity mask on the plot.
+            vlsr_mask (optional[float]): Systemic velocity in [m/s] used for
+                the mask. Required if ``vrot_mask`` is provided.
+            vrad_mask (optional[float]): Disk-frame radial velocity in [m/s]
+                used for the mask.
+            dv_mask (optional[float]): Half-width of the mask in [m/s].
+            plot_kwargs (optional[dict]): Kwargs passed to ``pcolormesh``.
+                Accepted keys include ``'vmin'``, ``'vmax'``, ``'cmap'`` and
+                ``'xlim'``.
+            return_fig (optional[bool]): Whether to return the figure.
+                Default is ``False``.
 
         Returns:
-            Matplotlib figure. To access the axis use ``ax=fig.axes[0]``.
+            fig (matplotlib figure): Returned if ``return_fig=True``. To
+                access the axis use ``fig.axes[0]``.
         """
 
         # Imports.
@@ -1803,27 +1819,33 @@ class annulus(object):
         Plot the measured line centroids as a function of polar angle.
 
         Args:
-            centroid_method (Optional[str]): Method used to determine the line
-                centroid. Default is `'quadratic'`.
-            plot_fit (Optional[bool]): Whether to overplot a SHO fit to the
-                data.
-            fit_vrad (Optional[bool]): Whether to include a radial velocity
-                component to the fit.
-            fix_vlsr (Optional[bool]): Fix the systemic velocity to calculate
-                the deprojected vertical velocities.
-            vrot_mask (Optional[float]):
-            vlsr_mask (Optional[float]):
-            vrad_mask (Optional[float]):
-            dv_mask (Optional[float]):
-            ax (Optional[matploib axis]): Axis to plot the data (and fit) onto,
-                otherwise a new figure will be created.
-            return_fig (Optional[bool]): Whether to return the figure for
-                subsequent plotting.
-            plot_kwargs (Optional[dict]):
+            centroid_method (optional[str]): Method used to determine the line
+                centroid. Must be one of ``'max'``, ``'quadratic'``,
+                ``'gaussian'``, ``'doublegauss'`` or
+                ``'doublegauss_fixeddv'``. Default is ``'quadratic'``.
+            plot_fit (optional[bool]): Whether to overplot a SHO fit to the
+                centroids. Default is ``False``.
+            fit_vrad (optional[bool]): Whether to include a radial velocity
+                component in the SHO fit. Default is ``False``.
+            fix_vlsr (optional[float]): If provided, fix the systemic velocity
+                to this value and compute the deprojected vertical velocity.
+            vrot_mask (optional[float]): Disk-frame rotational velocity in
+                [m/s] used to apply a mask before fitting centroids.
+            vlsr_mask (optional[float]): Systemic velocity in [m/s] used for
+                the mask.
+            vrad_mask (optional[float]): Disk-frame radial velocity in [m/s]
+                used for the mask.
+            dv_mask (optional[float]): Half-width of the mask in [m/s].
+            ax (optional[matplotlib axis]): Axis onto which the data will be
+                plotted. If ``None``, a new figure will be created.
+            return_fig (optional[bool]): Whether to return the figure.
+                Default is ``False``.
+            plot_kwargs (optional[dict]): Kwargs passed to
+                ``matplotlib.errorbar``.
 
         Returns:
-            Matplotlib figure. If `return_fig=True`. To access the axis use
-                ``ax=fig.axes[0]``. 
+            fig (matplotlib figure): Returned if ``return_fig=True``. To
+                access the axis use ``fig.axes[0]``.
         """
 
         from .helper_functions import SHO_double
@@ -1927,6 +1949,7 @@ class annulus(object):
 
     @staticmethod
     def cmap_RdGy():
+        """Return a custom red-gray diverging colormap for river plots."""
         import matplotlib.colors as mcolors
         c2 = plt.cm.Reds(np.linspace(0.0, 0.9, 16))
         c1 = plt.cm.gray(np.linspace(0.2, 1.0, 16))

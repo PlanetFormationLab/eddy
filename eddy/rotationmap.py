@@ -70,10 +70,12 @@ class rotationmap(datacube):
 
     @property
     def vlsr(self):
+        """Median line-of-sight velocity of the data in [m/s]."""
         return np.nanmedian(self.data)
 
     @property
     def vlsr_kms(self):
+        """Median line-of-sight velocity of the data in [km/s]."""
         return self.vlsr / 1e3
 
     # -- FITTING FUNCTIONS -- #
@@ -748,14 +750,18 @@ class rotationmap(datacube):
 
     def set_prior(self, param, args, type='flat'):
         """
-        Set the prior for the given parameter. There are two types of priors
-        currently usable, ``'flat'`` which requires ``args=[min, max]`` while
-        for ``'gaussian'`` you need to specify ``args=[mu, sig]``.
+        Set the prior for the given parameter used in ``fit_map``. Overwrites
+        any previously set prior (including the default) for that parameter.
+        There are two types of priors currently usable, ``'flat'`` which
+        requires ``args=[min, max]`` while for ``'gaussian'`` you need to
+        specify ``args=[mu, sig]``.
 
         Args:
-            param (str): Name of the parameter.
-            args (list): Values to use depending on the type of prior.
-            type (optional[str]): Type of prior to use.
+            param (str): Name of the parameter to set the prior for.
+            args (list): Boundary values ``[min, max]`` for a flat prior or
+                ``[mu, sigma]`` for a Gaussian prior.
+            type (Optional[str]): Type of prior, either ``'flat'`` or
+                ``'gaussian'``. Default is ``'flat'``.
         """
         type = type.lower()
         if type not in ['flat', 'gaussian']:
@@ -772,16 +778,20 @@ class rotationmap(datacube):
 
     def set_SHO_prior(self, param, args, type='flat'):
         """
-        Set the prior for the given parameter for the SHO fitting. There are
-        two types of priors currently usable, ``'flat'`` which requires
-        ``args=[min, max]`` while for ``'gaussian'`` you need to specify
-        ``args=[mu, sig]``. The three ``params`` which are available are
+        Set the prior for the given parameter used in ``fit_annuli``. Overwrites
+        any previously set prior (including the default) for that parameter.
+        There are two types of priors currently usable, ``'flat'`` which
+        requires ``args=[min, max]`` while for ``'gaussian'`` you need to
+        specify ``args=[mu, sig]``. The three ``params`` which are available are
         ``'vrot'``, ``'vrad'`` and ``'vlsr'``.
 
         Args:
-            param (str): Name of the parameter.
-            args (list): Values to use depending on the type of prior.
-            type (optional[str]): Type of prior to use.
+            param (str): Name of the parameter to set the prior for. Must be
+                one of ``'vrot'``, ``'vrad'``, or ``'vlsr'``.
+            args (list): Boundary values ``[min, max]`` for a flat prior or
+                ``[mu, sigma]`` for a Gaussian prior.
+            type (Optional[str]): Type of prior, either ``'flat'`` or
+                ``'gaussian'``. Default is ``'flat'``.
         """
         type = type.lower()
         if type not in ['flat', 'gaussian']:
@@ -852,6 +862,7 @@ class rotationmap(datacube):
 
         # Negative log-likelihood function.
         def nlnL(theta):
+            """Negative log-probability used as the minimization objective."""
             return -self._ln_probability(theta, params)
 
         method = kwargs.pop('method', 'TNC')
@@ -923,7 +934,14 @@ class rotationmap(datacube):
         return parameters
 
     def print_default_prior(self, parameter):
-        """Print the default prior for a given parameter."""
+        """
+        Print the default prior for a given parameter to stdout.
+
+        Args:
+            parameter (str): Name of the parameter whose default prior to
+                display. If the parameter is not a recognized free parameter, a
+                warning message is printed instead.
+        """
         try:
             prior_type = self.default_parameters[parameter]['prior_type']
             prior_values = self.default_parameters[parameter]['prior_values']
@@ -1041,7 +1059,19 @@ class rotationmap(datacube):
     def verify_params_dictionary(self, params):
         """
         Check that the minimum number of parameters are provided for the
-        fitting. For non-essential parameters a default value is set.
+        fitting and fill in defaults for any that are missing. Sets the
+        rotation velocity function (``'vfunc'``) based on whether a power-law
+        profile or Keplerian profile is requested, and flags whether a vortex
+        component should be included.
+
+        Args:
+            params (dict): Dictionary of model parameters, as passed to
+                ``fit_map``. Missing parameters are filled with their default
+                values from ``default_parameters.yml``.
+
+        Returns:
+            params (dict): The verified and completed parameter dictionary,
+                ready for use in model evaluation.
         """
 
         for p in self.default_parameters.keys():
@@ -1264,6 +1294,21 @@ class rotationmap(datacube):
         """
         Save the model as a FITS file. If you have used ``downsample`` when
         loading the cube data, _this will not work_.
+
+        Args:
+            samples (Optional[ndarray]): An array of samples returned from
+                ``fit_map``. Used to generate the model if ``model`` is not
+                provided.
+            params (Optional[dict]): The parameter dictionary passed to
+                ``fit_map``. Used to generate the model if ``model`` is not
+                provided.
+            model (Optional[ndarray]): A pre-computed model array. If not
+                provided, ``evaluate_models`` is called with ``samples`` and
+                ``params``.
+            filename (Optional[str]): Output filename. Defaults to the input
+                path with ``'_model.fits'`` replacing ``.fits``.
+            overwrite (Optional[bool]): If ``True``, overwrite any existing
+                file with the same name. Default is ``True``.
         """
         from astropy.io import fits
         if model is None:
@@ -1412,7 +1457,25 @@ class rotationmap(datacube):
             taper = np.exp(-np.power(taper, 2.0))
             vpow *= np.where(rvals <= r_p, 1.0, taper)
         return vpow
-    
+
+
+    def _eliptical_orbit(self, xvals, yvals, ac, ec):
+        """
+        Define the elliptical orbit properties.
+        xf is the distance from the focal point of the cavity.
+
+        Args:
+            xvals - disk frame cartesian coordinates
+            yvals - disk frame cartesian coordinates
+            xf - x-offset from disk center of ellipse focal point
+        """
+        bc2 = ac**2 * (1-ec**2)
+        c2 = ac**2 - bc2
+        x  = xvals - np.sqrt(c2) 
+        a2 = (x**2 + yvals**2 + c2) / 2 + np.sqrt((x**2 + yvals**2 + c2)**2 / 4 - x**2 * c2)
+        return np.sqrt(c2), np.sqrt(c2 / a2), np.sqrt(a2) 
+
+
     def _make_model_vortex(self, rvals, tvals, params, frame=None):
         """
         Vortex velocity profile projected onto the requested frame. Can return
@@ -1451,13 +1514,14 @@ class rotationmap(datacube):
             tvals_tmp = tvals + dtheta 
 
             # (x_tmp, y_tmp) describe the vortex cartesian frame.
+            # TODO: Should change x_tmp to be rvals * (stuff).
 
             x_tmp = params['r0_vortex'] * (tvals_tmp - np.radians(params['p0_vortex']))
             y_tmp = rvals - params['r0_vortex']
             x_vortex = np.append(x_vortex, x_tmp)
             y_vortex = np.append(y_vortex, y_tmp)
 
-            # (r_tmp, p_tmp) describe the disk polar frame.
+            # (r_tmp, p_tmp) describe the vortex polar frame.
 
             r_tmp = np.hypot(x_tmp, params['chi_vortex'] * y_tmp)
             p_tmp = np.arctan2(x_tmp, params['chi_vortex'] * y_tmp)
@@ -1504,7 +1568,6 @@ class rotationmap(datacube):
             assert x_sky.shape == y_sky.shape == v_proj.shape
             return x_sky, y_sky, v_proj
 
-
     def _proj_vphi(self, v_phi, tvals, params):
         """Project the rotational velocity onto the sky."""
         return v_phi * np.cos(tvals) * np.sin(abs(np.radians(params['inc'])))
@@ -1519,10 +1582,21 @@ class rotationmap(datacube):
 
     def _make_model(self, params):
         """Build the velocity model from the dictionary of parameters."""
+        
+        # Calculate the deprojected pixel values including ellipticity
 
-        # Get the model pixel-to-disk mappings.
+        ac = params.pop('ac', None)
+        ec = params.pop('ec', None)
+        om = params.pop('pericenter_phase', 0.0)
 
         rvals, tvals, zvals = self.disk_coords(**params)
+        if ec is not None and ac is not None:
+            xx, yy, _ = self.disk_coords(**params, frame='cartesian')
+            xvals = xx * np.cos(np.radians(om)) - yy * np.sin(np.radians(om))
+            yvals = xx * np.sin(np.radians(om)) + yy * np.cos(np.radians(om))
+            a = self._eliptical_orbit(xvals, yvals, ac, ec)[-1]
+            rvals = 1.0 / (2.0 / rvals - 1.0 / a)
+            #tvals = np.arcsin(xvals / rvals)
 
         # Calculate the velocity profile and project. This includes an
         # additional component from the vortex.
@@ -1562,6 +1636,11 @@ class rotationmap(datacube):
         Args:
             samples (ndarray): An array of samples returned from ``fit_map``.
             params (dict): The parameter dictionary passed to ``fit_map``.
+
+        Returns:
+            v_p, v_r, v_z (array, array, array): The deprojected rotational,
+                radial, and vertical velocity residuals in [m/s], each as a
+                2D array with the same shape as the data.
         """
         median_samples = np.median(samples, axis=0)
         verified_params = self.verify_params_dictionary(params.copy())
@@ -1775,6 +1854,7 @@ class rotationmap(datacube):
         from scipy.optimize import curve_fit
 
         def z_func(x, z0, psi, z1=0.0, phi=1.0):
+            """Parametric emission surface model: z = z0*r^psi + z1*r^phi."""
             return z0 * x**psi + z1 * x**phi
 
         # Get the coordinates to fit.
@@ -1809,7 +1889,15 @@ class rotationmap(datacube):
     # -- Axes Functions -- #
 
     def downsample_cube(self, N, randomize=False):
-        """Downsample the cube to make faster calculations."""
+        """
+        Downsample the cube to make faster calculations.
+
+        Args:
+            N (int or str): Downsampling factor. If ``N='beam'``, uses the beam
+                major axis divided by the pixel size as the factor.
+            randomize (Optional[bool]): If ``True``, choose a random starting
+                pixel offset rather than centering the sampling grid.
+        """
         N = int(np.ceil(self.bmaj / self.dpix)) if N == 'beam' else N
         if randomize:
             N0x, N0y = np.random.randint(0, N, 2)
@@ -1885,15 +1973,18 @@ class rotationmap(datacube):
 
     def plot_velocity_profiles(self, rpnts, velo, dvelo):
         """
-        Plot the velocity profiles. The `velo` array must specify 
+        Plot the velocity profiles. The `velo` array must specify
         ``[v_phi, v_r, v_z, v_lsr]`` in that order.
 
         Args:
-            rpnts (array): Array of the annulus centers.
+            rpnts (array): Array of the annulus centers in [arcsec].
             velo (ndarray): Array of the velocity profiles with a shape of
-                ``(nparam, nannuli)``.
+                ``(nparam, nannuli)`` in [m/s].
             dvelo (ndarray): Array of the uncertainties of the velocity
-                profiles with the same shape as ``fits``.
+                profiles with the same shape as ``velo`` in [m/s].
+
+        Returns:
+            None: The figure is displayed but not returned.
         """
 
         # Make the axes.

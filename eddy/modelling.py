@@ -93,40 +93,47 @@ def flared_disk_ensemble(radius=1.0, inc=30., mstar=1.0, dist=100., Tb=40.,
     """
     Create an ensemble of Gaussian lines with contamination from the far side
     of a flared disk (see Rosenfeld et al. 2013 for examples). Unlike
-    `gaussian_ensemble` a rotation velocity is not specified, rather a location
-    in the disk with a given inclination and stellar mass.
+    :func:`gaussian_ensemble`, a rotation velocity is not specified directly;
+    instead a disk location is defined by its radius, inclination, and stellar
+    mass, and the Keplerian velocity is computed internally.
 
-    - Inputs -
+    Args:
+        radius (float): Radius of the annulus in [arcsec].
+        inc (float): Inclination of the disk in [degrees]. Must be non-zero.
+        mstar (float): Mass of the central star in [Msun].
+        dist (float): Distance to the source in [pc].
+        Tb (float): Peak brightness temperature of the front-side component
+            in [K].
+        Tb2 (float): Peak brightness temperature of the far-side component in
+            [K]. For CO this is typically the freeze-out temperature (~21 K);
+            see Pinte et al. (2018a) for a discussion.
+        dV (float): Doppler linewidth of the front-side component in [m/s].
+        dV2 (float): Doppler linewidth of the far-side component in [m/s].
+            The default corresponds to the thermal width at ~21 K.
+        rms (float): RMS noise level in [K].
+        dV_chan (float): Channel width of the velocity axis in [m/s].
+        N (int): Number of spectra to generate in the ensemble.
+        PAmin (Optional[float]): Minimum polar angle in [rad] to consider.
+        PAmax (Optional[float]): Maximum polar angle in [rad] to consider.
+        linear_sample (Optional[bool]): If ``True``, linearly sample polar
+            angles; otherwise draw randomly from the given range.
+        aspect_ratio (Optional[float]): Aspect ratio ``z/r`` of the emission
+            surface at 1".
+        flaring_angle (Optional[float]): Flaring exponent of the emission
+            surface.
+        plot (Optional[bool]): If ``True``, plot the ensemble of spectra.
+        return_ensemble (Optional[bool]): If ``True``, return a
+            pre-initialised annulus instance instead of raw arrays.
 
-    radius          : The radius of the annulus in (arcseconds).
-    inc             : Inclination of the disk in (degrees). Must be non-zero.
-    mstar           : Mass of the central star in (Msun).
-    dist            : Distance to the central star in (pc).
-    Tb              : Peak brightness temperature of the main component in (K).
-    Tb2             : Peak brightness temperature of the rear component in (K).
-                      For CO this should be the freeze-out temperature of CO,
-                      so ~21K. See Pinte et al. (2018a) for a discussion.
-    dV              : Doppler width of the main line component in (m/s).
-    dV2             : Doppler width of the rear line component in (m/s). The
-                      default is the thermal width for Tkin = 21K.
-    rms             : RMS of the noise in (K).
-    dV_chan         : Channel width for the velocity axis (m/s).
-    N               : Number of spectra to generate in the ensemble.
-    PAmin           : Minimum polar angle to consider.
-    PAmax           : Maximum polar angle to consider.
-    linear_sample   : Linearlly sample the position angles or draw randomly.
-    aspect_ratio    : The aspect ratio of the disk (z / r) at 1".
-    flaring_angle   : The flaring angle of the disk.
-    plot            : Plot the ensemble.
-    return_ensemble : Return a pre-initialised ensemble instance.
+    Returns (if ``return_ensemble`` is ``False``):
+        spectra (ndarray): Array of shape ``[N, velax.size]`` of spectra in
+            [K].
+        theta (ndarray): Polar angles of each spectrum in [rad].
+        velax (ndarray): Velocity axis in [m/s].
+        vrot (float): Keplerian rotation velocity of the front side in [m/s].
 
-    - Outputs -
-
-    spectra         : [N, velax.size] shaped array of the spectra in (K).
-    theta           : Array of polar angles of spectra (radians).
-    velax           : Velocity axis in (m/s).
-    vrot            : Rotation velocity of the front side in (m/s).
-
+    Returns (if ``return_ensemble`` is ``True``):
+        annulus (annulus instance): Pre-initialised annulus instance.
     """
 
     from scipy.interpolate import griddata
