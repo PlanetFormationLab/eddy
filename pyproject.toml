@@ -1,3 +1,37 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "astro-eddy"
+version = "2.4.1"
+authors = [
+    { name = "Richard Teague", email = "rteague@mit.edu" }
+]
+description = "Tools to study the dynamics of protoplanetary disks."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "scipy>=1.7",
+    "numpy>=1.20",
+    "matplotlib>=3",
+    "emcee>=3",
+    "corner>=2",
+    "zeus-mcmc>=2",
+    "bettermoments>=1",
+]
+
+[project.urls]
+Homepage = "https://github.com/PlanetFormationLab/eddy"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eddy*"]
+
+[tool.setuptools.package-data]
+eddy = ["*.yml"]
