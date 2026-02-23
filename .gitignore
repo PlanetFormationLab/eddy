@@ -1,0 +1,8 @@
+*.ipynb_checkpoints
+*.fits
+**/__pycache__
+*.egg-info
+.DS_Store
+*.tar.gz
+*_dev.ipynb
+dist/
