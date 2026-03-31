@@ -33,9 +33,16 @@ extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.coverage',
     'sphinx.ext.napoleon',
-    'sphinx.ext.imgmath',
+    'sphinx.ext.mathjax',
     'nbsphinx',
 ]
+
+mathjax3_config = {
+    'tex': {
+        'inlineMath': [['$', '$'], ['\\(', '\\)']],
+        'displayMath': [['$$', '$$'], ['\\[', '\\]']],
+    }
+}
 
 # Is this really necessary...
 autodoc_mock_imports = ['astropy']
