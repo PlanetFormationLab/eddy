@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 
-from .datacube import datacube
-from .annulus import annulus
+import os
 import numpy as np
+import scipy.constants as sc
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
+
+from .imagecube import imagecube
+from .annulus import annulus
 import warnings
 
 warnings.filterwarnings("ignore")
 
 
-class linecube(datacube):
+class linecube(imagecube):
     """
     Read in a line cube and initialize the class.
 
@@ -22,8 +27,146 @@ class linecube(datacube):
     """
 
     def __init__(self, path, FOV=None, fill=0.0, velocity_range=None):
-        datacube.__init__(self, path=path, FOV=FOV, fill=fill,
-                          velocity_range=velocity_range)
+        super().__init__(path=path, FOV=FOV, fill=fill)
+        if velocity_range is not None:
+            self._clip_cube_velocity(*velocity_range)
+
+    # -- 3D CUBE I/O & DIAGNOSTICS -- #
+
+    @property
+    def rms(self):
+        return self.estimate_cube_RMS()
+
+    def _clip_cube_velocity(self, v_min=None, v_max=None):
+        """Clip the cube to within ``vmin`` and ``vmax``."""
+        if self.data.ndim == 2:
+            raise ValueError("Attaced cube has no velocity axis.")
+        v_min = self.velax[0] if v_min is None else v_min
+        v_max = self.velax[-1] if v_max is None else v_max
+        i = abs(self.velax - v_min).argmin()
+        i += 1 if self.velax[i] < v_min else 0
+        j = abs(self.velax - v_max).argmin()
+        j -= 1 if self.velax[j] > v_max else 0
+        self.velax = self.velax[i:j+1]
+        self.data = self.data[i:j+1]
+
+    def estimate_cube_RMS(self, N=10, r_in=0.0, r_out=1e10):
+        """
+        Estimate RMS of the cube based on first and last `N` channels and a
+        circular area described by an inner and outer radius.
+
+        Args:
+            N (int): Number of edge channels to include.
+            r_in (float): Inner edge of pixels to consider in [arcsec].
+            r_out (float): Outer edge of pixels to consider in [arcsec].
+
+        Returns:
+            RMS (float): The RMS based on the requested pixel range.
+        """
+        r_dep = np.hypot(self.xaxis[None, :], self.yaxis[:, None])
+        rmask = np.logical_and(r_dep >= r_in, r_dep <= r_out)
+        rms = np.concatenate([self.data[:int(N)], self.data[-int(N):]])
+        rms = np.where(rmask[None, :, :], rms, np.nan)
+        return np.sqrt(np.nansum(rms**2) / np.sum(np.isfinite(rms)))
+
+    def integrated_spectrum(self, x0=0.0, y0=0.0, inc=0.0, PA=0.0, r_min=None,
+                            r_max=None):
+        """
+        Returns the integrated spectrum over a specified region.
+
+        Args:
+            x0 (Optional[float]): Right Ascension offset in [arcsec].
+            y0 (Optional[float]): Declination offset in [arcsec].
+            inc (Optional[float]): Disk inclination in [deg].
+            PA (Optional[float]): Disk position angle in [deg].
+            r_min (Optional[float]): Radius to integrate out from in [arcsec].
+            r_max (Optional[float]): Radius to integrate out to in [arcsec].
+
+        Returns:
+            spectrum, uncertainty (array, array): Something about these.
+        """
+        rr = self.disk_coords(x0=x0, y0=y0, inc=inc, PA=PA)[0]
+        r_max = rr.max() if r_max is None else r_max
+        r_min = 0.0 if r_min is None else r_min
+        mask = np.logical_and(rr <= r_max, rr >= r_min)
+        nbeams = np.where(mask, 1, 0).sum() / self.pix_per_beam
+        spectrum = np.array([np.nansum(c[mask]) for c in self.data])
+        spectrum *= self.beams_per_pix
+        uncertainty = np.sqrt(nbeams) * self.estimate_cube_RMS()
+        return spectrum, uncertainty
+
+    def plot_maximum(self, ax=None, imshow_kwargs=None, return_fig=False):
+        """
+        Plot the maximum value along each spectrum.
+
+        Args:
+            ax (Optional[matplotlib axis]): Axis used for the plotting.
+            imshow_kwargs (Optional[dict]): Kwargs to pass to
+                ``matplotlib.imshow``.
+            return_fig (Optional[bool]): Whether to return the figure instance.
+                If an axis was provided, this will always be ``False``.
+
+        Returns:
+            fig (matplotlib figure): If ``return_fig=True``, will return the
+                figure for continued plotting.
+        """
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            return_fig = False
+
+        dmax = np.nanmax(self.data, axis=0)
+        vmax = np.percentile(dmax, [98])
+
+        imshow_kwargs = {} if imshow_kwargs is None else imshow_kwargs
+        imshow_kwargs['interpolation'] = 'nearest'
+        imshow_kwargs['extent'] = self.extent
+        imshow_kwargs['origin'] = 'lower'
+        imshow_kwargs['cmap'] = imshow_kwargs.pop('cmap', 'turbo')
+        imshow_kwargs['vmin'] = imshow_kwargs.pop('vmin', 0.0)
+        imshow_kwargs['vmax'] = imshow_kwargs.pop('vmax', vmax)
+
+        im = ax.imshow(dmax, **imshow_kwargs)
+        cb = plt.colorbar(im, ax=ax, pad=0.03, extend='both')
+        cb.set_label('Peak Intensity (Jy/beam)', rotation=270, labelpad=13)
+        cb.minorticks_on()
+        self._gentrify_plot(ax=ax)
+
+        if return_fig:
+            return fig
+
+    def plot_spectrum(self, ax=None, x0=0.0, y0=0.0, inc=0.0, PA=0.0,
+                      r_min=None, r_max=None, return_fig=False):
+        """
+        Plot the integrated spectrum.
+
+        Args:
+            x0 (Optional[float]): Right Ascension offset in [arcsec].
+            y0 (Optional[float]): Declination offset in [arcsec].
+            inc (Optional[float]): Disk inclination in [deg].
+            PA (Optional[float]): Disk position angle in [deg].
+            r_max (Optional[float]): Radius to integrate out to in [arcsec].
+        """
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            return_fig = False
+        x = self.velax.copy() / 1e3
+        y, dy = self.integrated_spectrum(x0, y0, inc, PA, r_min, r_max)
+        ax.axhline(0.0, ls='--', lw=1.0, color='0.9', zorder=-9)
+        ax.step(x, y, where='mid', lw=1.0, color='k')
+        ax.errorbar(x, y, dy, fmt=' ', lw=1.0, color='k', zorder=-8)
+        ax.set_xlabel("Velocity (km/s)")
+        ax.set_ylabel("Integrated Flux (Jy)")
+        ax.set_xlim(x[0], x[-1])
+        ticks = np.diff(ax.xaxis.get_majorticklocs()).mean() / 5.0
+        ax.xaxis.set_minor_locator(MultipleLocator(ticks))
+        ticks = np.diff(ax.yaxis.get_majorticklocs()).mean() / 5.0
+        ax.yaxis.set_minor_locator(MultipleLocator(ticks))
+
+        if return_fig:
+            return fig
 
     # -- ROTATION PROFILE FUNCTIONS -- #
 

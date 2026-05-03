@@ -6,7 +6,8 @@ import zeus
 import emcee
 import numpy as np
 import scipy.constants as sc
-from .datacube import datacube
+from .imagecube import imagecube
+from .momentmap import momentmap
 from .helper_functions import plot_walkers, plot_corner, random_p0
 import matplotlib.pyplot as plt
 import warnings
@@ -14,7 +15,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-class rotationmap(datacube):
+class rotationmap(momentmap):
     """
     Read in the velocity maps and initialize the class. To make the fitting
     quicker, we can clip the cube to a smaller region, or downsample the
@@ -47,8 +48,8 @@ class rotationmap(datacube):
 
     def __init__(self, path, FOV=None, uncertainty=None, downsample=None,
                  fill=None, force_center=False):
-        datacube.__init__(self, path=path, FOV=FOV, fill=fill,
-                          force_center=force_center)
+        super().__init__(path=path, FOV=FOV, fill=fill,
+                         force_center=force_center)
 
         # Check to see what unit the velocities are in.
 
@@ -1613,7 +1614,7 @@ class rotationmap(datacube):
         # Convolve if necessary.
 
         if params['beam']:
-            v0 = datacube._convolve_image(v0, self._beamkernel())
+            v0 = imagecube._convolve_image(v0, self._beamkernel())
 
         # Return.
 
@@ -1952,14 +1953,14 @@ class rotationmap(datacube):
     def _readuncertainty(self, uncertainty, FOV=None):
         """Reads the uncertainties."""
         if uncertainty is not None:
-            self.error = datacube(uncertainty, FOV=FOV, fill=None)
+            self.error = imagecube(uncertainty, FOV=FOV, fill=None)
             self.error = self.error.data.copy()
         else:
             try:
                 uncertainty = '_'.join(self.path.split('_')[:-1])
                 uncertainty += '_d' + self.path.split('_')[-1]
                 print("Assuming uncertainties in {}.".format(uncertainty))
-                self.error = datacube(uncertainty, FOV=FOV, fill=None)
+                self.error = imagecube(uncertainty, FOV=FOV, fill=None)
                 self.error = self.error.data.copy()
             except FileNotFoundError:
                 print("No uncertainties found, assuming uncertainties of 10%.")
@@ -2101,7 +2102,7 @@ class rotationmap(datacube):
         # Initialize the plotting parameters.
 
         imshow_kwargs = {} if imshow_kwargs is None else imshow_kwargs
-        imshow_kwargs['cmap'] = imshow_kwargs.pop('cmap', datacube.cmap())
+        imshow_kwargs['cmap'] = imshow_kwargs.pop('cmap', imagecube.cmap())
         imshow_kwargs['zorder'] = imshow_kwargs.pop('zorder', -9)
         imshow_kwargs['extent'] = self.extent
         imshow_kwargs['origin'] = 'lower'

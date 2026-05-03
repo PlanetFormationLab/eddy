@@ -19,10 +19,131 @@ try:
 except ImportError:
     celerite_installed = False
 
-__all__ = ['annulus']
+__all__ = ['annulus', 'Annulus', 'Annulus2D', 'Annulus3D']
 
 
-class annulus(object):
+class Annulus(object):
+    """
+    Base class for an annulus of pixels at a given disk-frame radius. Stores
+    the shared geometry (radial position, polar angle, sky coordinates, source
+    inclination, original pixel indices) and exposes a common
+    :func:`get_vlos` interface that subclasses must implement.
+
+    The 2D variant :class:`Annulus2D` holds one observed velocity per pixel
+    (e.g. extracted from a moment map) while the 3D variant
+    :class:`Annulus3D` holds a full spectrum per pixel (extracted from a line
+    cube).
+
+    Args:
+        pvals (ndarray): Polar angles in [rad] of each pixel. Range -pi to pi.
+        rvals (ndarray): Radial position in [arcsec] of each pixel.
+        xsky (ndarray): On-sky x-offset in [arcsec] of each pixel.
+        ysky (ndarray): On-sky y-offset in [arcsec] of each pixel.
+        jidx (ndarray): j-index of the original data array (y-axis).
+        iidx (ndarray): i-index of the original data array (x-axis).
+        inc (float): Inclination of the disk in [deg]. A positive inclination
+            specifies a clockwise rotating disk.
+    """
+
+    def __init__(self, pvals, rvals, xsky, ysky, jidx, iidx, inc):
+        if inc == 0.0:
+            raise ValueError("Disk inclination must be non-zero.")
+        self.theta = np.asarray(pvals)
+        self.rvals = np.asarray(rvals)
+        self.xsky = np.asarray(xsky)
+        self.ysky = np.asarray(ysky)
+        self.jidx = np.asarray(jidx)
+        self.iidx = np.asarray(iidx)
+        self.inc = inc
+        self.inc_rad = np.radians(inc)
+        self.sini = np.sin(self.inc_rad)
+        self.cosi = np.cos(self.inc_rad)
+        self.rotation = 'clockwise' if inc > 0 else 'anticlockwise'
+        self.theta_deg = np.degrees(self.theta)
+
+    def get_vlos(self, *args, **kwargs):
+        """Infer the line-of-sight velocity components. Implemented by
+        subclasses (:class:`Annulus2D`, :class:`Annulus3D`)."""
+        raise NotImplementedError(
+            "get_vlos() must be implemented by an Annulus subclass."
+        )
+
+
+class Annulus2D(Annulus):
+    """
+    A 2D annulus of pixel velocities extracted from a moment map (e.g.,
+    a velocity map). Each entry in ``vobs`` is the line-of-sight velocity at
+    one pixel within the annulus.
+
+    Args:
+        vobs (ndarray): Observed line-of-sight velocities in [m/s] at each
+            pixel in the annulus.
+        pvals (ndarray): Polar angles in [rad] of each pixel.
+        rvals (ndarray): Radial position in [arcsec] of each pixel.
+        xsky (ndarray): On-sky x-offset in [arcsec] of each pixel.
+        ysky (ndarray): On-sky y-offset in [arcsec] of each pixel.
+        jidx (ndarray): j-index of the original data array (y-axis).
+        iidx (ndarray): i-index of the original data array (x-axis).
+        inc (float): Inclination of the disk in [deg].
+        verror (Optional[ndarray]): Per-pixel uncertainty on ``vobs`` in
+            [m/s].
+    """
+
+    def __init__(self, vobs, pvals, rvals, xsky, ysky, jidx, iidx, inc,
+                 verror=None):
+        super().__init__(pvals=pvals, rvals=rvals, xsky=xsky, ysky=ysky,
+                         jidx=jidx, iidx=iidx, inc=inc)
+        self.vobs = np.asarray(vobs)
+        self.verror = None if verror is None else np.asarray(verror)
+        if self.vobs.shape != self.theta.shape:
+            raise ValueError("Mismatch between vobs and pvals shapes.")
+
+    def get_vlos(self, fit_method='SHO', fix_vlsr=None):
+        """
+        Fit a simple-harmonic-oscillator model to the observed velocities.
+
+        Returns:
+            v (ndarray): ``[v_phi, v_rad, v_z]`` deprojected velocities in
+                [m/s]. Components that are not constrained will be ``NaN``.
+            dv (ndarray): Uncertainties on the velocity components.
+        """
+        if fit_method.upper() != 'SHO':
+            raise NotImplementedError(
+                "Annulus2D currently only supports fit_method='SHO'."
+            )
+        sigma = (None if self.verror is None
+                 else np.where(self.verror > 0, self.verror, np.nan))
+
+        def sho(theta, vphi, vrad, vlsr):
+            return (vphi * np.cos(theta) + vrad * np.sin(theta)) * self.sini \
+                   + vlsr
+
+        if fix_vlsr is not None:
+            def model(theta, vphi, vrad):
+                return sho(theta, vphi, vrad, fix_vlsr)
+            p0 = [np.nanstd(self.vobs), 0.0]
+        else:
+            model = sho
+            p0 = [np.nanstd(self.vobs), 0.0, np.nanmedian(self.vobs)]
+
+        try:
+            popt, pcov = curve_fit(model, self.theta, self.vobs, p0=p0,
+                                   sigma=sigma, absolute_sigma=sigma is not None)
+            perr = np.sqrt(np.diag(pcov))
+        except Exception:
+            popt = np.full(len(p0), np.nan)
+            perr = np.full(len(p0), np.nan)
+
+        if fix_vlsr is not None:
+            v = np.array([popt[0], popt[1], np.nan])
+            dv = np.array([perr[0], perr[1], np.nan])
+        else:
+            v = np.array([popt[0], popt[1], np.nan])
+            dv = np.array([perr[0], perr[1], np.nan])
+        return v, dv
+
+
+class annulus(Annulus):
     """
     A class containing an annulus of spectra with their associated polar angles
     measured east of north from the redshifted major axis. These range from -pi
@@ -1955,3 +2076,7 @@ class annulus(object):
         c1 = plt.cm.gray(np.linspace(0.2, 1.0, 16))
         colors = np.vstack((c1, np.ones((2, 4)), c2))
         return mcolors.LinearSegmentedColormap.from_list('eddymap', colors)
+
+
+# The 3D annulus is identical to the existing ``annulus`` class.
+Annulus3D = annulus
