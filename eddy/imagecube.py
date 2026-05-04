@@ -814,22 +814,95 @@ class imagecube(object):
 
     def to_fits(self, path, data=None, header=None, overwrite=False):
         """
-        Write data to a FITS file, preserving the original header by default.
+        Write data to a FITS file with a header consistent with the live state.
+
+        The original ``self.header`` reflects the file as it was on disk; after
+        operations like FOV clipping (``_clip_cube_spatial``), velocity range
+        clipping (``_clip_cube_velocity``), or axis flips applied during
+        ``_read_FITS``, it no longer matches ``self.data``. By default this
+        method rebuilds the axis-related keywords from ``self.xaxis``,
+        ``self.yaxis``, and ``self.velax`` so the output is self-consistent.
 
         Args:
             path (str): Output file path.
             data (Optional[array]): Data to write. Defaults to ``self.data``.
-            header (Optional[fits.Header]): Header to use. Defaults to a copy
-                of ``self.header``.
+                Spatial dimensions must match ``(yaxis.size, xaxis.size)``.
+            header (Optional[fits.Header]): Header to use. If provided, it is
+                written verbatim (no rebuilding). Defaults to a header rebuilt
+                from the live state.
             overwrite (Optional[bool]): If ``True``, overwrite an existing
                 file at ``path``.
         """
         data = self.data if data is None else data
-        header = self.header.copy() if header is None else header
+        data = np.asarray(data)
+        header = self._consistent_header(data) if header is None else header
         fits.writeto(os.path.expanduser(path),
-                     data=np.asarray(data),
+                     data=data,
                      header=header,
                      overwrite=overwrite)
+
+    def _consistent_header(self, data):
+        """Return a copy of ``self.header`` with axis keywords rebuilt to
+        match ``data`` and the live ``xaxis`` / ``yaxis`` / ``velax``.
+
+        The spectral axis (if present) is always written as VELO-LSR in m/s
+        on FITS axis 3, since ``self.velax`` is stored in m/s. Any leftover
+        4th-axis (e.g. STOKES) keywords are stripped; ``self.data`` is already
+        squeezed by ``_read_FITS``.
+        """
+        header = self.header.copy()
+        ndim = data.ndim
+        if ndim not in (2, 3):
+            raise ValueError(
+                "to_fits only supports 2D or 3D data; got ndim={}.".format(ndim)
+            )
+
+        nx = data.shape[-1]
+        ny = data.shape[-2]
+        if nx != self.xaxis.size or ny != self.yaxis.size:
+            raise ValueError(
+                "Data shape {} does not match live spatial axes "
+                "(yaxis={}, xaxis={}). Pass a custom header to override."
+                .format(data.shape, self.yaxis.size, self.xaxis.size)
+            )
+
+        if nx > 1:
+            header['CDELT1'] = float(self.xaxis[1] - self.xaxis[0]) / 3600.0
+        if ny > 1:
+            header['CDELT2'] = float(self.yaxis[1] - self.yaxis[0]) / 3600.0
+        header['NAXIS1'] = nx
+        header['NAXIS2'] = ny
+        header['CRPIX1'] = 0.5 * (nx + 1)
+        header['CRPIX2'] = 0.5 * (ny + 1)
+
+        if ndim == 3:
+            nchan = data.shape[0]
+            if self.velax is None or self.velax.size != nchan:
+                raise ValueError(
+                    "3D data has {} channels but live velax has {}."
+                    .format(nchan, 0 if self.velax is None else self.velax.size)
+                )
+            if nchan > 1:
+                cdelt3 = float(self.velax[1] - self.velax[0])
+            else:
+                cdelt3 = float(self.chan) if self.chan else 0.0
+            header['NAXIS3'] = nchan
+            header['CTYPE3'] = 'VELO-LSR'
+            header['CUNIT3'] = 'm/s'
+            header['CRVAL3'] = float(self.velax[0])
+            header['CRPIX3'] = 1.0
+            header['CDELT3'] = cdelt3
+            for key in ('NAXIS4', 'CTYPE4', 'CRVAL4', 'CRPIX4',
+                        'CDELT4', 'CUNIT4'):
+                header.pop(key, None)
+        else:
+            for n in (3, 4):
+                for prefix in ('NAXIS', 'CTYPE', 'CRVAL', 'CRPIX',
+                               'CDELT', 'CUNIT'):
+                    header.pop('{}{}'.format(prefix, n), None)
+
+        header['NAXIS'] = ndim
+        return header
 
     def _clip_cube_spatial(self, radius, initial_load=True, indices=False):
         """Clip the cube plus or minus clip arcseconds from the origin."""
