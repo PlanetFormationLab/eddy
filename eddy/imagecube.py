@@ -1151,7 +1151,7 @@ class imagecube(object):
 
         if sampling > 1:
             start = np.random.randint(0, pvals.size)
-            dvals = np.vstack([dvals[start:], dvals[:start]])
+            dvals = np.concatenate([dvals[start:], dvals[:start]])
             pvals = np.concatenate([pvals[start:], pvals[:start]])
             rvals = np.concatenate([rvals[start:], rvals[:start]])
             xsky = np.concatenate([xsky[start:], xsky[:start]])

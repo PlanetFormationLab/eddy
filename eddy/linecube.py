@@ -33,6 +33,24 @@ class linecube(imagecube):
 
     # -- 3D CUBE I/O & DIAGNOSTICS -- #
 
+    def to_momentmap(self, method='zeroth', clip=None,
+                     bettermoments_kwargs=None):
+        """Collapse the spectral cube to a 2D moment map.
+
+        Returns a :class:`momentmap` instance (or :class:`rotationmap` for
+        ``method`` in ``{'first', 'quadratic'}``). When ``bettermoments`` is
+        installed and ``method`` matches one of its method names, this
+        method delegates to it.
+
+        .. note::
+            Stubbed for Phase 4.2; calling this currently raises
+            ``NotImplementedError``.
+        """
+        raise NotImplementedError(
+            "linecube.to_momentmap() is scheduled for Phase 4.2 of the "
+            "refactor. Use bettermoments directly for now."
+        )
+
     @property
     def rms(self):
         return self.estimate_cube_RMS()

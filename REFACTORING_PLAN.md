@@ -52,18 +52,19 @@ eddy/
 
 ### Phase 1 status
 
-Done:
+Phase 1 is complete.
+
 - 1.1 `imagecube.py` created (commit `3fb3864`).
-- 1.2 `momentmap.py` created and inherits `imagecube` (commit `3fb3864`).
-- 1.3 `rotationmap` now inherits `momentmap` (commit `3fb3864`).
-- 1.4 `linecube` inherits `imagecube`; `get_annulus()` returns `Annulus3D` via the `annulus = Annulus3D` alias (commit `3fb3864`).
-- 1.5 `Annulus` base + `Annulus2D` + `Annulus3D` defined and exported (commit `3fb3864`).
+- 1.2 `momentmap.py` created with `get_annulus()` returning `Annulus2D`.
+- 1.3 `rotationmap` inherits `momentmap`; `fit_annuli()` rewired to use `self.get_annulus(...).get_vlos(...)` instead of an inline SHO fit loop.
+- 1.4 `linecube` inherits `imagecube`; `get_annulus()` returns `Annulus3D` via the `annulus = Annulus3D` alias; `to_momentmap()` stubbed with `NotImplementedError` until Phase 4.2.
+- 1.5 `Annulus`, `Annulus2D`, `Annulus3D` defined and exported. `Annulus2D.get_vlos()` mirrors `Annulus3D.get_vlos_SHO()`: fits projected coefficients then deprojects via inclination, returning length-2 (or length-3 with `fit_vrad=True`) arrays.
 - 4.1 `to_fits()` with header-rebuild helper (commit `e9384f2`).
 
-Still open:
-- **1.2 `momentmap.get_annulus()`** — the method itself isn't implemented yet. Should return an `Annulus2D` instance built from the 2D map.
-- **1.3 `rotationmap.fit_annuli()` rewiring** — currently still calls the inline `self._fit_SHO(...)` loop at `rotationmap.py:191`. Plan calls for replacing this with `self.get_annulus(...).get_vlos(...)` once `momentmap.get_annulus()` lands.
-- **1.4 `linecube.to_momentmap()` stub** — add a method that raises `NotImplementedError` until Phase 4.2 is implemented, so the public API surface is in place.
+Notes from the rewire:
+- `imagecube._independent_samples` now uses `np.concatenate` instead of `np.vstack` so it works with both 1D (per-pixel velocity) and 2D (per-pixel spectrum) `dvals`.
+- `rotationmap._fit_SHO` is now unused; left in place for now to avoid breaking any external callers depending on the private helper. Safe to remove in a later cleanup.
+- The rewire produces FP-level differences (~1e-3 m/s) vs the inline implementation due to a different summation order in `curve_fit`; physically equivalent. The innermost annulus when `beam_spacing>0` may differ slightly more because the new code uses the actual mean of pixel deprojected radii rather than the bin midpoint when computing the thinning rate.
 
 ### 1.1 Create `imagecube.py` from `datacube.py`
 

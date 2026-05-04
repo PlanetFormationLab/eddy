@@ -400,99 +400,58 @@ class rotationmap(momentmap):
 
         # Cycle through each annulus to include the fit.
 
+        if MCMC:
+            raise NotImplementedError("MCMC fitting in fit_annuli is not "
+                                      "supported.")
+
         for r_min, r_max in zip(rbins[:-1], rbins[1:]):
 
-            # Define the annulus mask. If there are no pixels in it, after
-            # removing all the NaNs values, continue to the next annulus.
-
-            try:
-                mask = self.get_mask(r_min=r_min,
-                                     r_max=r_max,
-                                     phi_min=phi_min,
-                                     phi_max=phi_max,
-                                     exclude_phi=exclude_phi,
-                                     abs_phi=abs_phi,
-                                     x0=x0,
-                                     y0=y0,
-                                     inc=inc,
-                                     PA=PA,
-                                     z0=z0,
-                                     psi=psi,
-                                     r_cavity=r_cavity,
-                                     r_taper=r_taper,
-                                     q_taper=q_taper,
-                                     z_func=z_func,
-                                     shadowed=shadowed,
-                                     mask_frame=mask_frame,
-                                     user_mask=user_mask)
-            except ValueError:
-                velo += [empty]
-                dvelo += [empty]
-                continue
-
-            # Extract the finite pixels and order them in increase pval.
-
-            x = pvals.copy()[mask].flatten()
-            y = self.data.copy()[mask].flatten()
-            dy = self.error.copy()[mask].flatten()
-            isfinite = np.isfinite(y) & np.isfinite(dy)
-            x, y, dy = x[isfinite], y[isfinite], dy[isfinite]
-            sorted = np.argsort(x)
-            x, y, dy = x[sorted], y[sorted], dy[sorted]
-
-            if len(x) < 2:
-                velo += [empty]
-                dvelo += [empty]
-                continue
-
-            # Here we can include some sampling to mimic the `niter` command
-            # when using a full cube. If using `niter > 1` then the value and
-            # uncertainty returned will be the uncertainty-weighted average and
-            # standard deviation of the samples. If `niter = 1` is used,
-            # we just return the curve_fit values.
+            # If `niter > 1` then the value and uncertainty returned will be
+            # the uncertainty-weighted average and standard deviation of the
+            # samples. Each iteration draws an independent random rotation
+            # in get_annulus()'s beam-spacing thinning step.
 
             velo_tmp = []
             dvelo_tmp = []
 
             for _ in range(niter):
-
-                sampling = float(beam_spacing) * self.bmaj
-                sampling /= np.mean([r_min, r_max]) * np.median(np.diff(x))
-                sampling = np.floor(sampling).astype('int')
-                if sampling < 1 and beam_spacing > 0.0:
-                    print("Pixels appear to be spatially independent.")
-                    print("Will set `beam_spacing=0`.")
-                    beam_spacing = 0.0
-
-                if not beam_spacing:
-                    x_tmp, y_tmp, dy_tmp = x, y, dy
-                else:
-                    start = np.random.randint(0, x.size)
-                    x_tmp = np.hstack([x[start:], x[:start]])[::sampling]
-                    y_tmp = np.hstack([y[start:], y[:start]])[::sampling]
-                    dy_tmp = np.hstack([dy[start:], dy[:start]])[::sampling]
-
-                # Fit the pixels, and correct the radial velocity to have
-                # positive velocities describining motions away from the star.
-                # Include the radial component (set to zero) if it wasn't
-                # considered and save these as projected velocities.
-
                 try:
-                    popt, cvar = self._fit_SHO(x=x_tmp,
-                                               y=y_tmp,
-                                               dy=dy_tmp,
-                                               inc=inc,
-                                               fit_vrad=fit_vrad,
-                                               fix_vlsr=fix_vlsr,
-                                               MCMC=MCMC,
-                                               optimize_kwargs=optimize_kwargs)
+                    ann = self.get_annulus(r_min=r_min, r_max=r_max,
+                                           phi_min=phi_min, phi_max=phi_max,
+                                           exclude_phi=exclude_phi,
+                                           abs_phi=abs_phi, x0=x0, y0=y0,
+                                           inc=inc, PA=PA, z0=z0, psi=psi,
+                                           r_cavity=r_cavity,
+                                           r_taper=r_taper, q_taper=q_taper,
+                                           z_func=z_func, shadowed=shadowed,
+                                           mask_frame=mask_frame,
+                                           user_mask=user_mask,
+                                           beam_spacing=beam_spacing)
                 except ValueError:
                     velo_tmp += [empty]
                     dvelo_tmp += [empty]
                     continue
 
-                # Make sure that the values are populated so there is always
-                # four components: [v_rot, v_rad, v_alt, v_lsr].
+                if ann.theta.size < 2:
+                    velo_tmp += [empty]
+                    dvelo_tmp += [empty]
+                    continue
+
+                # Fit on projected coefficients, deproject via the inclination
+                # inside Annulus2D.get_vlos. ``vrad`` follows the convention
+                # that positive values describe motion away from the star.
+
+                try:
+                    popt, cvar = ann.get_vlos(fit_method='SHO',
+                                              fit_vrad=fit_vrad,
+                                              fix_vlsr=fix_vlsr,
+                                              optimize_kwargs=optimize_kwargs)
+                except ValueError:
+                    velo_tmp += [empty]
+                    dvelo_tmp += [empty]
+                    continue
+
+                # Pad to four components: [v_rot, v_rad, v_alt, v_lsr].
 
                 velo_tmp += [[popt[0],
                               popt[1] if fit_vrad else 0.0,
