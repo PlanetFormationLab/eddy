@@ -42,13 +42,28 @@ eddy/
 └── default_parameters.yml   # unchanged
 ```
 
-`datacube.py` is removed; any direct user imports of `datacube` (not in the public API) would break, but `datacube` is not exported so this is acceptable.
+`datacube.py` is kept as a thin backward-compatibility shim that re-exports `imagecube as datacube`. The shim is harmless (a few lines, no logic) and protects any direct user `from eddy.datacube import datacube` calls. Confirmed acceptable to leave in place; can be removed in a future major version if desired.
 
 ---
 
 ## Phase 1 — Class Hierarchy Restructuring
 
 **No JAX yet. Goal: establish the new structure while keeping all tests passing.**
+
+### Phase 1 status
+
+Done:
+- 1.1 `imagecube.py` created (commit `3fb3864`).
+- 1.2 `momentmap.py` created and inherits `imagecube` (commit `3fb3864`).
+- 1.3 `rotationmap` now inherits `momentmap` (commit `3fb3864`).
+- 1.4 `linecube` inherits `imagecube`; `get_annulus()` returns `Annulus3D` via the `annulus = Annulus3D` alias (commit `3fb3864`).
+- 1.5 `Annulus` base + `Annulus2D` + `Annulus3D` defined and exported (commit `3fb3864`).
+- 4.1 `to_fits()` with header-rebuild helper (commit `e9384f2`).
+
+Still open:
+- **1.2 `momentmap.get_annulus()`** — the method itself isn't implemented yet. Should return an `Annulus2D` instance built from the 2D map.
+- **1.3 `rotationmap.fit_annuli()` rewiring** — currently still calls the inline `self._fit_SHO(...)` loop at `rotationmap.py:191`. Plan calls for replacing this with `self.get_annulus(...).get_vlos(...)` once `momentmap.get_annulus()` lands.
+- **1.4 `linecube.to_momentmap()` stub** — add a method that raises `NotImplementedError` until Phase 4.2 is implemented, so the public API surface is in place.
 
 ### 1.1 Create `imagecube.py` from `datacube.py`
 
@@ -58,7 +73,7 @@ Extract the shared 2D/3D functionality from `datacube` into `imagecube`:
 - Shared coordinate methods (`disk_coords`, `get_mask`, `radial_profile`, `cartesian_deprojection`, `polar_deprojection`)
 - Physical constants (`msun`, `fwhm`, `flared_niter`, etc.)
 - Plotting utilities that work on both 2D and 3D data
-- **New**: `to_fits(path, data=None, overwrite=False)` — writes `self.data` (or provided array) back to FITS preserving the original header. Useful for saving model velocity maps.
+- **New**: `to_fits(path, data=None, header=None, overwrite=False)` — writes `self.data` (or a provided array) back to FITS. By default, axis keywords (`NAXIS*`, `CDELT1/2`, `CRPIX1/2`, and the spectral axis for 3D data) are rebuilt from the live `xaxis` / `yaxis` / `velax` via a `_consistent_header()` helper, so FOV clipping, velocity-range clipping, and the read-time axis flips don't desync the header from the data. Passing an explicit `header=` bypasses the rebuild.
 
 `imagecube.__init__` signature:
 ```python
