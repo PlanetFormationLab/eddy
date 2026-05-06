@@ -5,6 +5,7 @@ import yaml
 import zeus
 import emcee
 import numpy as np
+import jax.numpy as jnp
 import scipy.constants as sc
 from .imagecube import imagecube
 from .momentmap import momentmap
@@ -1373,8 +1374,8 @@ class rotationmap(momentmap):
         r_m = rvals * sc.au * params['dist']
         z_m = zvals * sc.au * params['dist']
         mtotal = params['mstar'] + self._calc_mdisk(rvals, params)
-        vkep = sc.G * mtotal * self.msun * np.power(r_m, 2)
-        return np.sqrt(vkep * np.power(np.hypot(r_m, z_m), -3))
+        vkep = sc.G * mtotal * self.msun * jnp.power(r_m, 2)
+        return jnp.sqrt(vkep * jnp.power(jnp.hypot(r_m, z_m), -3))
 
     def _calc_mdisk(self, rvals, params):
         """Psuedo disk self-gravity component."""
@@ -1383,21 +1384,21 @@ class rotationmap(momentmap):
         exponent = 2.0 - params['gamma']
         rscale = rvals**exponent - params['r_in']**exponent
         rscale /= params['r_out']**exponent - params['r_in']**exponent
-        return params['mdisk'] * np.clip(rscale, a_min=0.0, a_max=1.0)
+        return params['mdisk'] * jnp.clip(rscale, 0.0, 1.0)
 
     def _vkep_pressure(self, rvals, tvals, zvals, params):
         """Keplerian rotation velocity with pressure term."""
         vkep = self._vkep(rvals, tvals, zvals, params)
         r_p = params['r_pressure']
-        idx = np.unravel_index(abs(rvals - r_p).argmin(), rvals.shape)
+        idx = jnp.unravel_index(jnp.argmin(jnp.abs(rvals - r_p)), rvals.shape)
         dvprs = (1.0 - 1.5 * r_p**2 / (r_p**2 + zvals[idx]**2))
         dvprs = ((rvals - r_p) / r_p) * dvprs + 1.0
-        vkep = np.where(rvals <= r_p, vkep, vkep[idx] * dvprs)
-        vkep = np.clip(vkep, a_min=0.0, a_max=None)
+        vkep = jnp.where(rvals <= r_p, vkep, vkep[idx] * dvprs)
+        vkep = jnp.clip(vkep, 0.0, None)
         if params['w_pressure'] > 0.0:
             taper = (rvals - r_p) / params['w_pressure']
-            taper = np.exp(-np.power(taper, 2.0))
-            vkep *= np.where(rvals <= r_p, 1.0, taper)
+            taper = jnp.exp(-jnp.power(taper, 2.0))
+            vkep *= jnp.where(rvals <= r_p, 1.0, taper)
         return vkep
 
     def _vpow(self, rvals, tvals, zvals, params):
@@ -1409,13 +1410,13 @@ class rotationmap(momentmap):
         """Power-law rotation with pressure term."""
         vpow = self._vpow(rvals, tvals, zvals, params)
         r_p = params['r_pressure']
-        idx = np.unravel_index(abs(rvals - r_p).argmin(), rvals.shape)
+        idx = jnp.unravel_index(jnp.argmin(jnp.abs(rvals - r_p)), rvals.shape)
         dvprs = ((rvals - r_p) / r_p) * params['vp_q'] + 1.0
-        vpow = np.where(rvals <= r_p, vpow, vpow[idx] * dvprs)
+        vpow = jnp.where(rvals <= r_p, vpow, vpow[idx] * dvprs)
         if params['w_pressure'] > 0.0:
             taper = (rvals - r_p) / params['w_pressure']
-            taper = np.exp(-np.power(taper, 2.0))
-            vpow *= np.where(rvals <= r_p, 1.0, taper)
+            taper = jnp.exp(-jnp.power(taper, 2.0))
+            vpow *= jnp.where(rvals <= r_p, 1.0, taper)
         return vpow
 
 
@@ -1431,9 +1432,9 @@ class rotationmap(momentmap):
         """
         bc2 = ac**2 * (1-ec**2)
         c2 = ac**2 - bc2
-        x  = xvals - np.sqrt(c2) 
-        a2 = (x**2 + yvals**2 + c2) / 2 + np.sqrt((x**2 + yvals**2 + c2)**2 / 4 - x**2 * c2)
-        return np.sqrt(c2), np.sqrt(c2 / a2), np.sqrt(a2) 
+        x  = xvals - jnp.sqrt(c2)
+        a2 = (x**2 + yvals**2 + c2) / 2 + jnp.sqrt((x**2 + yvals**2 + c2)**2 / 4 - x**2 * c2)
+        return jnp.sqrt(c2), jnp.sqrt(c2 / a2), jnp.sqrt(a2)
 
 
     def _make_model_vortex(self, rvals, tvals, params, frame=None):
@@ -1463,48 +1464,48 @@ class rotationmap(momentmap):
         # Loop through (at least 1) layers to extent the azimuthal map for
         # vortices which overlap.
 
-        x_vortex, y_vortex, v_vortex = [], [], []
+        x_vortex_layers, y_vortex_layers, v_vortex_layers = [], [], []
         v_disk_stack, v_proj_stack = [], []
 
         for i in range(-(self._vortex_layers-1), self._vortex_layers):
 
             # Shift in the polar angle.
 
-            dtheta = i * 2.0 * np.pi
-            tvals_tmp = tvals + dtheta 
+            dtheta = i * 2.0 * jnp.pi
+            tvals_tmp = tvals + dtheta
 
             # (x_tmp, y_tmp) describe the vortex cartesian frame.
             # TODO: Should change x_tmp to be rvals * (stuff).
 
-            x_tmp = params['r0_vortex'] * (tvals_tmp - np.radians(params['p0_vortex']))
+            x_tmp = params['r0_vortex'] * (tvals_tmp - jnp.radians(params['p0_vortex']))
             y_tmp = rvals - params['r0_vortex']
-            x_vortex = np.append(x_vortex, x_tmp)
-            y_vortex = np.append(y_vortex, y_tmp)
+            x_vortex_layers.append(x_tmp)
+            y_vortex_layers.append(y_tmp)
 
             # (r_tmp, p_tmp) describe the vortex polar frame.
 
-            r_tmp = np.hypot(x_tmp, params['chi_vortex'] * y_tmp)
-            p_tmp = np.arctan2(x_tmp, params['chi_vortex'] * y_tmp)
-            p_tmp = np.clip(p_tmp, a_min=-np.pi, a_max=np.pi)
+            r_tmp = jnp.hypot(x_tmp, params['chi_vortex'] * y_tmp)
+            p_tmp = jnp.arctan2(x_tmp, params['chi_vortex'] * y_tmp)
+            p_tmp = jnp.clip(p_tmp, -jnp.pi, jnp.pi)
 
             # Model the vortex radial velocity profile as a Gaussian.
 
             v_tmp = ((r_tmp - params['r_vortex']) / params['w_vortex'])**2
-            v_tmp = params['v_vortex'] * np.exp(-v_tmp)
-            v_vortex = np.append(v_vortex, v_tmp)
+            v_tmp = params['v_vortex'] * jnp.exp(-v_tmp)
+            v_vortex_layers.append(v_tmp)
             v_disk_stack += [v_tmp]
 
             # Project the vortex velocity onto the sky.
 
-            v_proj_tmp = v_tmp * np.cos(tvals_tmp + p_tmp)
-            v_proj_tmp *= np.sin(abs(np.radians(params['inc'])))
+            v_proj_tmp = v_tmp * jnp.cos(tvals_tmp + p_tmp)
+            v_proj_tmp *= jnp.sin(abs(jnp.radians(params['inc'])))
             v_proj_stack += [v_proj_tmp]
 
         # Combine the different layers by summing them up. Note that this will
         # give rise to odd effects if the vortex tails are overlapping.
 
-        v_disk = np.sum(v_disk_stack, axis=0)
-        v_proj = np.sum(v_proj_stack, axis=0)
+        v_disk = jnp.sum(jnp.stack(v_disk_stack, axis=0), axis=0)
+        v_proj = jnp.sum(jnp.stack(v_proj_stack, axis=0), axis=0)
 
         # Return the vortex model along with the appropriate coordinates.
         # Note that in the `vortex`, `polar` or  `face-on` frame the velocity
@@ -1513,36 +1514,39 @@ class rotationmap(momentmap):
         if frame is None:
             return v_proj
         elif frame == 'vortex':
+            x_vortex = jnp.concatenate([a.flatten() for a in x_vortex_layers])
+            y_vortex = jnp.concatenate([a.flatten() for a in y_vortex_layers])
+            v_vortex = jnp.concatenate([a.flatten() for a in v_vortex_layers])
             assert x_vortex.shape == y_vortex.shape == v_vortex.shape
             return x_vortex, y_vortex, v_vortex
         elif frame == 'polar':
             assert rvals.shape == tvals.shape == v_disk.shape
             return rvals, tvals, v_disk
         elif frame == 'face-on':
-            x_disk = rvals * np.cos(tvals)
-            y_disk = rvals * np.sin(tvals)
+            x_disk = rvals * jnp.cos(tvals)
+            y_disk = rvals * jnp.sin(tvals)
             assert x_disk.shape == y_disk.shape == v_disk.shape
             return x_disk, y_disk, v_disk
         elif frame == 'sky':
-            x_sky, y_sky = np.meshgrid(self.xaxis, self.yaxis)
+            x_sky, y_sky = jnp.meshgrid(self.xaxis, self.yaxis)
             assert x_sky.shape == y_sky.shape == v_proj.shape
             return x_sky, y_sky, v_proj
 
     def _proj_vphi(self, v_phi, tvals, params):
         """Project the rotational velocity onto the sky."""
-        return v_phi * np.cos(tvals) * np.sin(abs(np.radians(params['inc'])))
+        return v_phi * jnp.cos(tvals) * jnp.sin(abs(jnp.radians(params['inc'])))
 
     def _proj_vrad(self, v_rad, tvals, params):
         """Project the radial velocity onto the sky."""
-        return v_rad * np.sin(tvals) * np.sin(-np.radians(params['inc']))
+        return v_rad * jnp.sin(tvals) * jnp.sin(-jnp.radians(params['inc']))
 
     def _proj_valt(self, v_alt, tvals, params):
         """Project the vertical velocity onto the sky."""
-        return -v_alt * np.cos(np.radians(params['inc']))
+        return -v_alt * jnp.cos(jnp.radians(params['inc']))
 
     def _make_model(self, params):
         """Build the velocity model from the dictionary of parameters."""
-        
+
         # Calculate the deprojected pixel values including ellipticity
 
         ac = params.pop('ac', None)
@@ -1552,18 +1556,18 @@ class rotationmap(momentmap):
         rvals, tvals, zvals = self.disk_coords(**params)
         if ec is not None and ac is not None:
             xx, yy, _ = self.disk_coords(**params, frame='cartesian')
-            xvals = xx * np.cos(np.radians(om)) - yy * np.sin(np.radians(om))
-            yvals = xx * np.sin(np.radians(om)) + yy * np.cos(np.radians(om))
+            xvals = xx * jnp.cos(jnp.radians(om)) - yy * jnp.sin(jnp.radians(om))
+            yvals = xx * jnp.sin(jnp.radians(om)) + yy * jnp.cos(jnp.radians(om))
             a = self._eliptical_orbit(xvals, yvals, ac, ec)[-1]
             rvals = 1.0 / (2.0 / rvals - 1.0 / a)
-            #tvals = np.arcsin(xvals / rvals)
+            #tvals = jnp.arcsin(xvals / rvals)
 
         # Calculate the velocity profile and project. This includes an
         # additional component from the vortex.
 
         vphi = params['vfunc'](rvals, tvals, zvals, params)
         vphi_proj = self._proj_vphi(vphi, tvals, params)
-        if params['vortex']:        
+        if params['vortex']:
             vvor_proj = self._make_model_vortex(rvals, tvals, params)
         else:
             vvor_proj = 0.0
@@ -1583,9 +1587,9 @@ class rotationmap(momentmap):
         """Build the velocity profile from the dictionary of parameters."""
         rvals, _, zvals = self.disk_coords(**params)
         rvals, zvals = rvals.flatten(), zvals.flatten()
-        idx = np.argsort(rvals)
+        idx = jnp.argsort(rvals)
         rvals, zvals = rvals[idx], zvals[idx]
-        tvals = np.zeros(rvals.size)
+        tvals = jnp.zeros(rvals.size)
         return rvals, params['vfunc'](rvals, tvals, zvals, params)
 
     def deproject_model_residuals(self, samples, params):
