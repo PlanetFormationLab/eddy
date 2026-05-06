@@ -291,25 +291,33 @@ Migration:
 
 ## Phase 3 — numpyro MCMC
 
-**Goal: replace emcee/zeus with numpyro NUTS as default; keep emcee as fallback.**
+**Goal: add a numpyro NUTS backend to the rotationmap MCMC; keep emcee/zeus working unchanged.**
+
+### Survey of current MCMC entry points
+
+Three call sites in the codebase build samplers today:
+
+1. **`rotationmap.fit_map`** → `_run_mcmc` (around `rotationmap.py:888`). Standard emcee/zeus over `_ln_probability`. The big one — typical fits do 10⁴–10⁵ likelihood evaluations. JAX-traceable end-to-end after Phase 2.3, so the chain `theta -> _make_model -> _ln_likelihood` is ready to plug into a numpyro model.
+2. **`Annulus3D.get_vlos_GP`** → emcee EnsembleSampler over the tinygp Matérn-3/2 likelihood (`annulus.py:567+`). JAX-traceable after Phase 2.6.
+3. **`rotationmap._SHO_MCMC`** (`rotationmap.py:636`), invoked from `fit_annuli(MCMC=True)`. Currently raises `NotImplementedError`. Out of scope for Phase 3.
 
 ### 3.1 Dependencies
 
-Add to `pyproject.toml`:
+`numpyro` is **not** currently installed. Add to `pyproject.toml`:
 ```toml
 "numpyro>=0.15",
 ```
-Keep `emcee>=3` and `zeus-mcmc>=2` as optional fallbacks.
+Keep `emcee>=3` and `zeus-mcmc>=2` as runtime dependencies (still wired in the existing samplers).
 
 ### 3.2 Sampler selection
 
-All MCMC entry points (`fit_map`, `get_vlos`) gain a `sampler` keyword:
+All MCMC entry points gain a `sampler=` keyword:
 
 ```python
-def fit_map(self, p0, params, ..., sampler='numpyro'):
-    # sampler='numpyro'  → numpyro NUTS (default if installed)
-    # sampler='emcee'    → emcee EnsembleSampler (existing code path)
-    # sampler='zeus'     → zeus EnsembleSampler (existing code path)
+def fit_map(self, p0, params, ..., sampler=None):
+    # sampler='numpyro' → numpyro NUTS
+    # sampler='emcee'   → emcee EnsembleSampler (legacy)
+    # sampler='zeus'    → zeus EnsembleSampler (legacy)
 ```
 
 Auto-detection fallback:
@@ -321,6 +329,8 @@ except ImportError:
     _default_sampler = 'emcee'
 ```
 
+**Open question: default sampler.** Plan-as-written defaults to numpyro when installed, which is a behaviour change for existing users (different number of samples returned, different walker semantics, possibly different posterior medians at the noise floor). Defaulting to `'emcee'` and making numpyro opt-in via `sampler='numpyro'` is a less invasive option — flag for decision before writing 3.4.
+
 ### 3.3 Parameter mapping for backward compat
 
 Existing kwargs are mapped to numpyro equivalents internally:
@@ -331,34 +341,71 @@ Existing kwargs are mapped to numpyro equivalents internally:
 | `nburnin` | `num_warmup` |
 | `nsteps` | `num_samples` |
 
-Users who pass `nwalkers=32, nburnin=300, nsteps=1000` get the same behavior. A `DeprecationWarning` is raised pointing to the new names, but the old names keep working.
+`DeprecationWarning` raised when the old names are used. Note: `eddy.rotationmap` and `eddy.annulus` both call `warnings.filterwarnings("ignore")` at import — that would silently swallow our deprecation warnings. Either remove the global filter (preferred) or use `warnings.warn(..., stacklevel=2)` with `category=DeprecationWarning` after re-enabling that category explicitly.
 
-### 3.4 numpyro model definition
+### 3.4 numpyro model for `fit_map`
 
-The current `params` dict (which maps parameter names to either a free index in `p0` or a fixed value) translates naturally to numpyro:
+The Phase 2.4 `priors_jax` registry already tags every prior as a structured tuple (`('flat', lo, hi, fn)` or `('gaussian', mu, sigma, fn)`); translating to numpyro distributions is mechanical:
 
 ```python
 import numpyro
 import numpyro.distributions as dist
 
-def _numpyro_model(self, params, data, uncertainty):
-    p = {}
-    for name, val in params.items():
-        if isinstance(val, int):   # free parameter — sample from prior
-            prior = self._get_prior(name)
-            p[name] = numpyro.sample(name, prior)
-        else:                      # fixed — deterministic
-            p[name] = numpyro.deterministic(name, val)
-    
-    model = self._get_velocity_model(**p)   # JAX-jitted
-    numpyro.sample('obs', dist.Normal(model, uncertainty), obs=data)
+def _numpyro_model_fitmap(self, params):
+    theta = []
+    for name in self._free_parameter_keys(params):
+        spec = rotationmap.priors_jax[name]
+        if spec[0] == 'flat':
+            _, lo, hi, _ = spec
+            theta.append(numpyro.sample(name, dist.Uniform(lo, hi)))
+        else:                          # gaussian
+            _, mu, sigma, _ = spec
+            theta.append(numpyro.sample(name, dist.Normal(mu, sigma)))
+    theta = jnp.stack(theta)
+
+    populated = rotationmap._populate_dictionary(theta, params)
+    model = self._make_model(populated)
+    sigma = jnp.where(self.ivar > 0, 1.0 / jnp.sqrt(self.ivar), jnp.inf)
+    numpyro.sample(
+        'obs',
+        dist.Normal(model, sigma).mask(self.mask),
+        obs=jnp.asarray(self.data),
+    )
 ```
 
-Priors are read from `default_parameters.yml` exactly as now.
+`_make_model` and `_populate_dictionary` are unchanged from Phase 2 — they're already jnp-friendly. `dist.Normal(...).mask(self.mask)` skips the per-pixel likelihood contribution wherever `self.mask` is False (matches the existing `np.where(self.mask, ..., 0)` pattern).
 
-### 3.5 Return format
+### 3.5 NUTS runner + return format
 
-The return format from `fit_map` and `get_vlos` is unchanged: a numpy array of samples with shape `(nsteps * nwalkers, ndim)`. With numpyro, samples from all chains are concatenated to produce the same shape.
+```python
+def _run_nuts(self, p0, params, num_chains, num_warmup, num_samples, **kwargs):
+    nuts = numpyro.infer.NUTS(self._numpyro_model_fitmap)
+    mcmc = numpyro.infer.MCMC(
+        nuts, num_warmup=num_warmup, num_samples=num_samples,
+        num_chains=num_chains, progress_bar=kwargs.pop('progress', True),
+    )
+    mcmc.run(jax.random.PRNGKey(kwargs.pop('seed', 0)), params)
+    samples_dict = mcmc.get_samples()       # {name: (num_chains*num_samples,)}
+    free_keys = self._free_parameter_keys(params)
+    return np.stack([np.asarray(samples_dict[k]) for k in free_keys], axis=1)
+```
+
+Output shape `(num_chains * num_samples, ndim)` — concatenated chains, matches the legacy `(nwalkers * nsteps, ndim)` contract.
+
+### 3.6 `Annulus3D.get_vlos_GP` (deferred)
+
+The GP-path `_lnprior` (`annulus.py:847`) uses bespoke checks (`abs(vrot - vref) / vref > 0.4`, `abs(vrad/vrot) > 1.0`, etc.) rather than the structured `priors_jax` registry. Translating to numpyro `dist` calls requires either rewriting `_lnprior` in terms of standard priors (cleaner, but a behaviour change) or implementing the constraints via `numpyro.factor(...)` penalties (preserves behaviour, less idiomatic). Defer to a Phase 3.x once 3.4–3.5 are validated.
+
+### Implementation order
+
+| Step | What | Effort |
+|---|---|---|
+| 3.1 | Add `numpyro>=0.15` to pyproject; install locally; add auto-detect `_default_sampler` | XS |
+| 3.4 | Implement `_numpyro_model_fitmap` (uses Phase 2.4 `priors_jax`) | M |
+| 3.5 | Implement `_run_nuts` and dispatch from `fit_map` | M |
+| 3.3 | `nwalkers/nburnin/nsteps` → `num_chains/num_warmup/num_samples` mapping with `DeprecationWarning` (and unblock the filter) | S |
+| **Validation** | Run a tutorial `fit_map` under emcee and numpyro; compare posterior medians and 16/84 percentiles. The most important step — proves NUTS converges to the same answer. | M |
+| 3.6 *(later)* | numpyro path for `Annulus3D.get_vlos_GP` (refactor GP `_lnprior` to structured priors first) | M–L |
 
 ---
 
@@ -398,19 +445,20 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 
 ## Implementation Order
 
-| Phase | Milestone | Complexity | Impact |
+| Phase | Milestone | Complexity | Status |
 |---|---|---|---|
-| 1.1–1.2 | `imagecube` + `momentmap` | Medium | Foundation for everything |
-| 1.3–1.4 | Update `rotationmap`, `linecube` inheritance | Low | Clean up hierarchy |
-| 1.5 | `Annulus` base + `Annulus2D` / `Annulus3D` | Medium | Enables 2D annulus fitting |
-| 4.1 | `to_fits()` | Low | Immediate user value |
-| 2.1 | jax/jaxlib dependency | Trivial | Enables 2.3+ |
-| 2.3 | JAX-trace + JIT `disk_coords` and `_make_model` (incl. FFT convolution) | High | Foundation for autodiff and GPU |
-| 2.4 | Autodiff for pre-MCMC `_optimize_p0` | Medium | Faster `fit_map` init |
-| 2.6 | celerite → tinygp swap for GP annulus | High | Unblocks JIT for GP path; numpyro-friendly |
-| 3.1–3.5 | numpyro NUTS sampler | High | Core sampling improvement |
-| 2.5 | GPU support | Low | Free via JAX |
-| 4.2 | `to_momentmap()` | Medium | Convenience |
+| 1.1–1.2 | `imagecube` + `momentmap` | Medium | ✅ Done (`3fb3864`) |
+| 1.3–1.4 | Update `rotationmap`, `linecube` inheritance | Low | ✅ Done (`bbbcc6f`) |
+| 1.5 | `Annulus` base + `Annulus2D` / `Annulus3D` | Medium | ✅ Done (`bbbcc6f`) |
+| 4.1 | `to_fits()` | Low | ✅ Done (`e9384f2`) |
+| 2.1 | jax/jaxlib dependency | Trivial | ✅ Done (`71754d1`) |
+| 2.3 | JAX-trace + JIT `disk_coords` and `_make_model` (incl. FFT convolution + likelihood) | High | ✅ Done (`e43cef1`–`d0f6387`) |
+| 2.4 | Autodiff for pre-MCMC `_optimize_p0` | Medium | ✅ Done (`82d6d38`) |
+| 2.5 | GPU support | Low | ✅ Done (`10d2e21`) |
+| 2.6 | celerite → tinygp swap for GP annulus | High | ✅ Done (`767b044`) |
+| 3.1–3.5 | numpyro NUTS sampler for `fit_map` | High | ⏭ Next |
+| 3.6 | numpyro NUTS for `Annulus3D.get_vlos_GP` | Medium-high | ⏭ Deferred (needs `_lnprior` refactor first) |
+| 4.2 | `to_momentmap()` | Medium | ⏭ Stubbed with `NotImplementedError` |
 
 ---
 
