@@ -11,13 +11,8 @@ from scipy.stats import binned_statistic
 from scipy.optimize import curve_fit
 from scipy.optimize import minimize
 
-# Check is 'celerite' is installed.
-
-try:
-    import celerite
-    celerite_installed = True
-except ImportError:
-    celerite_installed = False
+import jax.numpy as jnp
+from tinygp import GaussianProcess, kernels
 
 __all__ = ['annulus', 'Annulus', 'Annulus2D', 'Annulus3D']
 
@@ -373,8 +368,6 @@ class annulus(Annulus):
         fit_method = fit_method.lower()
         if fit_method not in ['dv', 'gp', 'snr', 'sho']:
             raise ValueError("method must be 'dV', 'GP', 'SNR' or 'SHO'.")
-        if fit_method == 'gp' and not celerite_installed:
-            raise ImportError("Must install 'celerite' to use GP method.")
         if fix_vlsr is not None and fit_method != 'sho':
             print("WARNING: fix_vlsr only available for fit_method='SHO'.")
 
@@ -622,10 +615,15 @@ class annulus(Annulus):
         returns = [r.lower() for r in np.atleast_1d(returns)]
         if 'none' in returns:
             return None
-        if 'percentiles' in returns:
+        # Resolve all string keys to arrays in one pass so the `in` checks
+        # don't trip over a numpy array left in the list by the previous
+        # branch (`'samples' in [array, ...]` raises ambiguous-truth).
+        wants_percentiles = 'percentiles' in returns
+        wants_samples = 'samples' in returns
+        if wants_percentiles:
             idx = returns.index('percentiles')
             returns[idx] = np.percentile(samples, [16, 50, 84], axis=0).T
-        if 'samples' in returns:
+        if wants_samples:
             idx = returns.index('samples')
             returns[idx] = samples
         return returns[0] if len(returns) == 1 else returns
@@ -833,16 +831,29 @@ class annulus(Annulus):
 
     @staticmethod
     def _build_kernel(x, y, hyperparams):
-        """Build the GP kernel. Returns None if gp.compute(x) fails."""
+        """Build the GP. Returns ``None`` if construction fails.
+
+        Replaces the previous celerite implementation with tinygp; the
+        kernel parameterisation is preserved exactly:
+
+        - ``noise`` adds a diagonal jitter ``noise**2`` (matches
+          ``celerite.terms.JitterTerm(log_sigma=log(noise))``).
+        - ``exp(lnsigma)**2 * Matern32(scale=exp(lnrho))`` matches
+          ``celerite.terms.Matern32Term(log_sigma=lnsigma,
+          log_rho=lnrho)``.
+        - The GP mean is the nan-mean of ``y`` (matches the previous
+          ``mean=np.nanmean(y), fit_mean=True``).
+        """
         noise, lnsigma, lnrho = hyperparams
-        k_noise = celerite.terms.JitterTerm(log_sigma=np.log(noise))
-        k_line = celerite.terms.Matern32Term(log_sigma=lnsigma, log_rho=lnrho)
-        gp = celerite.GP(k_noise + k_line, mean=np.nanmean(y), fit_mean=True)
+        sigma2 = jnp.exp(2.0 * lnsigma)
+        rho = jnp.exp(lnrho)
+        kernel = sigma2 * kernels.Matern32(scale=rho)
         try:
-            gp.compute(x)
+            return GaussianProcess(kernel, jnp.asarray(x),
+                                   diag=noise ** 2,
+                                   mean=jnp.nanmean(y))
         except Exception:
             return None
-        return gp
 
     @staticmethod
     def _lnprior(theta, vref):
@@ -893,7 +904,10 @@ class annulus(Annulus):
         gp = annulus._build_kernel(x, y, hyperparams)
         if gp is None:
             return -np.inf
-        ll = gp.log_likelihood(y, quiet=True)
+        try:
+            ll = float(gp.log_probability(jnp.asarray(y)))
+        except Exception:
+            return -np.inf
         return ll if np.isfinite(ll) else -np.inf
 
     def _lnprobability(self, theta, vref, vlsr_mask=None, dv_mask=None,

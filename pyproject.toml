@@ -21,6 +21,7 @@ dependencies = [
     "numpy>=1.20",
     "jax>=0.4",
     "jaxlib>=0.4",
+    "tinygp>=0.3",
     "matplotlib>=3",
     "emcee>=3",
     "corner>=2",
