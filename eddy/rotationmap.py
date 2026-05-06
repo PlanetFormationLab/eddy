@@ -5,6 +5,7 @@ import yaml
 import zeus
 import emcee
 import numpy as np
+import jax
 import jax.numpy as jnp
 import scipy.constants as sc
 from .imagecube import imagecube
@@ -44,6 +45,7 @@ class rotationmap(momentmap):
     """
 
     priors = {}
+    priors_jax = {}
     SHO_priors = {}
     _vortex_layers = 2
 
@@ -728,13 +730,23 @@ class rotationmap(momentmap):
         if type not in ['flat', 'gaussian']:
             raise ValueError("type must be 'flat' or 'gaussian'.")
         if type == 'flat':
+            lo, hi = float(min(args)), float(max(args))
+            log_density = max(-100.0, np.log(1.0 / (hi - lo)))
             def prior(p):
-                if not min(args) <= p <= max(args):
+                if not lo <= p <= hi:
                     return -np.inf
-                return max(-100.0, np.log(1.0 / (max(args) - min(args))))
+                return log_density
+            def prior_jax(p):
+                in_bounds = jnp.logical_and(p >= lo, p <= hi)
+                return jnp.where(in_bounds, log_density, -jnp.inf)
+            rotationmap.priors_jax[param] = ('flat', lo, hi, prior_jax)
         else:
+            mu, sigma = float(args[0]), float(args[1])
             def prior(p):
-                return -0.5 * ((args[0] - p) / args[1])**2
+                return -0.5 * ((mu - p) / sigma)**2
+            def prior_jax(p):
+                return -0.5 * ((mu - p) / sigma)**2
+            rotationmap.priors_jax[param] = ('gaussian', mu, sigma, prior_jax)
         rotationmap.priors[param] = prior
 
     def set_SHO_prior(self, param, args, type='flat'):
@@ -815,24 +827,54 @@ class rotationmap(momentmap):
     # -- MCMC Functions -- #
 
     def _optimize_p0(self, theta, params, **kwargs):
-        """Optimize the initial starting positions."""
+        """Optimize the initial starting positions.
+
+        Uses ``scipy.optimize.minimize`` with method ``L-BFGS-B`` and an
+        analytic gradient computed via ``jax.grad`` of a JAX-traceable
+        negative log-probability. Bounds are derived from any flat priors
+        on free parameters; Gaussian-prior parameters are unbounded.
+        Falls back to the older finite-difference path with a default
+        method of ``L-BFGS-B`` if the autodiff path raises (e.g. because
+        a user-installed prior is not JAX-traceable).
+        """
         from scipy.optimize import minimize
 
-        # TODO: implement bounds.
-        # TODO: cycle through parameters one at a time for a better fit.
+        free_keys = self._free_parameter_keys(params)
+        bounds = self._optimize_bounds(free_keys)
 
-        # Negative log-likelihood function.
-        def nlnL(theta):
-            """Negative log-probability used as the minimization objective."""
-            return -self._ln_probability(theta, params)
-
-        method = kwargs.pop('method', 'TNC')
+        method = kwargs.pop('method', 'L-BFGS-B')
         options = kwargs.pop('options', {})
         options['maxiter'] = options.pop('maxiter', 10000)
-        options['maxfun'] = options.pop('maxfun', 10000)
         options['ftol'] = options.pop('ftol', 1e-3)
 
-        res = minimize(nlnL, x0=theta, method=method, options=options)
+        try:
+            grad_fn = jax.jit(jax.grad(
+                lambda t: self._neg_ln_prob_jax(t, params)
+            ))
+            # Warm the JIT cache and verify the gradient is finite at p0,
+            # so we fail fast into the fallback path if autodiff cannot be
+            # applied to this parameter set.
+            g0 = np.asarray(grad_fn(jnp.asarray(theta)))
+            if not np.all(np.isfinite(g0)):
+                raise ValueError(
+                    "Initial gradient contains non-finite values."
+                )
+            def nlnL(theta_np):
+                return float(self._neg_ln_prob_jax(jnp.asarray(theta_np),
+                                                   params))
+            def jac(theta_np):
+                return np.asarray(grad_fn(jnp.asarray(theta_np)))
+            res = minimize(nlnL, x0=np.asarray(theta), jac=jac,
+                           method=method, bounds=bounds, options=options)
+        except Exception as exc:
+            warnings.warn(
+                "Falling back to finite-difference optimisation; "
+                "autodiff path raised: {}".format(exc)
+            )
+            def nlnL(theta_np):
+                return -self._ln_probability(theta_np, params)
+            res = minimize(nlnL, x0=np.asarray(theta), method=method,
+                           bounds=bounds, options=options)
         if res.success:
             theta = res.x
             print("Optimized starting positions:")
@@ -875,6 +917,48 @@ class rotationmap(momentmap):
         lnx2 = jnp.where(self.mask, (data - model) ** 2, 0.0)
         lnx2 = -0.5 * jnp.sum(lnx2 * self.ivar)
         return jnp.where(jnp.isfinite(lnx2), lnx2, -jnp.inf)
+
+    def _ln_prior_jax(self, params):
+        """JAX-traceable log-prior. Mirrors :meth:`_ln_prior` but uses
+        ``rotationmap.priors_jax`` so the result composes with
+        ``jax.grad``. Out-of-bounds flat priors return ``-jnp.inf``."""
+        lnp = jnp.array(0.0)
+        for key in params.keys():
+            if key in rotationmap.priors_jax and params[key] is not None:
+                _, _, _, prior_jax = rotationmap.priors_jax[key]
+                lnp = lnp + prior_jax(params[key])
+        return lnp
+
+    def _neg_ln_prob_jax(self, theta, params):
+        """JAX-traceable negative log-posterior. Used by
+        :meth:`_optimize_p0` as the objective for ``jax.grad``."""
+        model = rotationmap._populate_dictionary(theta, params)
+        lnp = self._ln_prior_jax(model)
+        ll = self._ln_likelihood(model)
+        return -(lnp + ll)
+
+    @staticmethod
+    def _free_parameter_keys(params):
+        """Return the parameter names that are free (placeholder ints) in
+        the order matching the ``theta`` index they reference."""
+        free = [(v, k) for k, v in params.items()
+                if isinstance(v, int) and not isinstance(v, bool)]
+        free.sort()
+        return [k for _, k in free]
+
+    @staticmethod
+    def _optimize_bounds(free_keys):
+        """Build ``L-BFGS-B`` bounds from the registered priors. Flat
+        priors give finite bounds; Gaussian (unbounded) priors and
+        params without a registered prior get ``(None, None)``."""
+        bounds = []
+        for key in free_keys:
+            spec = rotationmap.priors_jax.get(key)
+            if spec is not None and spec[0] == 'flat':
+                bounds.append((spec[1], spec[2]))
+            else:
+                bounds.append((None, None))
+        return bounds
 
     def _ln_probability(self, theta, *params_in):
         """Log-probablility function."""

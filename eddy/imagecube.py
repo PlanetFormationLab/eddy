@@ -1334,12 +1334,22 @@ class imagecube(object):
             kernel_arr = kernel.array if hasattr(kernel, 'array') else kernel
             img_jnp = jnp.asarray(image)
             ker_jnp = jnp.asarray(kernel_arr, dtype=img_jnp.dtype)
-            image_np = np.asarray(image)
-            if np.any(np.isnan(image_np)):
+            # Dispatch on NaN presence when ``image`` is a concrete array;
+            # under jax tracing (e.g. inside jax.grad) the numpy
+            # conversion would fail, so default to the NaN-safe path so
+            # the function stays autodiff-compatible.
+            try:
+                has_nan = bool(np.any(np.isnan(np.asarray(image))))
+            except (TypeError, jax.errors.TracerArrayConversionError,
+                    jax.errors.ConcretizationTypeError):
+                has_nan = True
+            if has_nan:
                 result = _fft_convolve_nan_jnp(img_jnp, ker_jnp)
             else:
                 result = _fft_convolve_jnp(img_jnp, ker_jnp)
-            return np.asarray(result)
+            if isinstance(image, np.ndarray):
+                return np.asarray(result)
+            return result
         from astropy.convolution import convolve
         return convolve(image, kernel, preserve_nan=True)
 
