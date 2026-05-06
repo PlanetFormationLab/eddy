@@ -15,6 +15,17 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+def _get_backend():
+    """Return the JAX default backend ('cpu', 'gpu', or 'tpu').
+
+    eddy doesn't pin its computations to a specific device; whichever
+    backend JAX detects at import time will be used by all JIT'd helpers
+    automatically. Install a GPU-enabled ``jaxlib`` and JAX will pick up
+    the GPU on its own.
+    """
+    return jax.default_backend()
+
+
 # ----------------------------------------------------------------------------
 # JAX-traceable pixel deprojection.
 #
@@ -1035,6 +1046,13 @@ class imagecube(object):
     def pix_per_beam(self):
         """Number of pixels in a beam."""
         return self.beamarea_arcsec / self.dpix**2.0
+
+    @staticmethod
+    def backend():
+        """JAX backend the JIT'd helpers will run on ('cpu', 'gpu', or
+        'tpu'). Whichever device JAX detects at import time is used; to
+        run on GPU, install a CUDA- or METAL-enabled ``jaxlib``."""
+        return _get_backend()
 
     def to_fits(self, path, data=None, header=None, overwrite=False):
         """
