@@ -118,6 +118,21 @@ def _flared_polar_user_jnp(xaxis, yaxis, x0, y0, inc, PA, z_func, niter):
     return r_tmp, jnp.arctan2(y_tmp, x_mid), z_func(r_tmp)
 
 
+@partial(jax.jit, static_argnames=('exclude_r', 'exclude_phi'))
+def _build_mask_jnp(rvals, pvals, r_min, r_max, phi_min, phi_max,
+                    exclude_r, exclude_phi):
+    """Pure compute for the radial+azimuthal pixel mask. Inputs are the
+    deprojected coordinate arrays plus scalar thresholds; ``exclude_r`` and
+    ``exclude_phi`` are static so each combination compiles once."""
+    r_mask = jnp.logical_and(rvals >= r_min, rvals <= r_max)
+    if exclude_r:
+        r_mask = jnp.logical_not(r_mask)
+    phi_mask = jnp.logical_and(pvals >= phi_min, pvals <= phi_max)
+    if exclude_phi:
+        phi_mask = jnp.logical_not(phi_mask)
+    return jnp.logical_and(r_mask, phi_mask)
+
+
 class imagecube(object):
     """
     An ``imagecube`` instance to read in data in a ``FITS`` format. This is the
@@ -791,7 +806,7 @@ class imagecube(object):
             inc = 0.0
             PA = 0.0
 
-        # Calculate the deprojected pixel coordaintes.
+        # Calculate the deprojected pixel coordinates.
 
         rvals, pvals = self.disk_coords(x0=x0, y0=y0, inc=inc, PA=PA, z0=z0,
                                         psi=psi, r_cavity=r_cavity,
@@ -799,33 +814,46 @@ class imagecube(object):
                                         w_i=w_i, w_r=w_r, w_t=w_t,
                                         z_func=z_func, frame='cylindrical',
                                         shadowed=shadowed)[:2]
-        pvals = abs(pvals) if abs_phi else pvals
+        if abs_phi:
+            pvals = jnp.abs(pvals)
 
-        # Radial mask.
+        # Resolve scalar defaults (host-transfer once per call). The .item()
+        # calls force concrete Python floats so the JIT cache for
+        # ``_build_mask_jnp`` is keyed on the boolean static args, not on
+        # tracer-dependent jnp scalars.
 
-        r_min = np.nanmin(rvals) if r_min is None else r_min
-        r_max = np.nanmax(rvals) if r_max is None else r_max
+        if r_min is None:
+            r_min = float(jnp.nanmin(rvals))
+        if r_max is None:
+            r_max = float(jnp.nanmax(rvals))
         if r_min >= r_max:
             raise ValueError("`r_min` must be smaller than `r_max`.")
-        r_mask = np.logical_and(rvals >= r_min, rvals <= r_max)
-        r_mask = ~r_mask if exclude_r else r_mask
 
-        # Azimuthal mask.
-
-        phi_min = np.nanmin(pvals) if phi_min is None else np.radians(phi_min)
-        phi_max = np.nanmax(pvals) if phi_max is None else np.radians(phi_max)
+        if phi_min is None:
+            phi_min = float(jnp.nanmin(pvals))
+        else:
+            phi_min = float(np.radians(phi_min))
+        if phi_max is None:
+            phi_max = float(jnp.nanmax(pvals))
+        else:
+            phi_max = float(np.radians(phi_max))
         if phi_min >= phi_max:
             raise ValueError("`PA_min` must be smaller than `PA_max`.")
-        phi_mask = np.logical_and(pvals >= phi_min, pvals <= phi_max)
-        phi_mask = ~phi_mask if exclude_phi else phi_mask
 
-        # Combine and return.
+        mask = _build_mask_jnp(rvals, pvals, r_min, r_max, phi_min, phi_max,
+                               bool(exclude_r), bool(exclude_phi))
 
-        mask = r_mask * phi_mask
-        if np.sum(mask) == 0:
+        # Validate that the mask is non-empty (host transfer for the sum).
+
+        if int(jnp.sum(mask)) == 0:
             raise ValueError("There are zero pixels in the mask.")
+
+        # Drop back to numpy for backward compatibility with downstream
+        # callers that fancy-index numpy arrays with this mask.
+
+        mask = np.asarray(mask)
         if user_mask is not None:
-            mask *= user_mask
+            mask = mask * user_mask
         return mask
 
     # -- DATA I/O -- #
