@@ -871,9 +871,10 @@ class rotationmap(momentmap):
     def _ln_likelihood(self, params):
         """Log-likelihood function. Simple chi-squared likelihood."""
         model = self._make_model(params)
-        lnx2 = np.where(self.mask, np.power((self.data - model), 2), 0.0)
-        lnx2 = -0.5 * np.sum(lnx2 * self.ivar)
-        return lnx2 if np.isfinite(lnx2) else -np.inf
+        data = jnp.asarray(self.data)
+        lnx2 = jnp.where(self.mask, (data - model) ** 2, 0.0)
+        lnx2 = -0.5 * jnp.sum(lnx2 * self.ivar)
+        return jnp.where(jnp.isfinite(lnx2), lnx2, -jnp.inf)
 
     def _ln_probability(self, theta, *params_in):
         """Log-probablility function."""
@@ -956,39 +957,46 @@ class rotationmap(momentmap):
         except AttributeError:
             self.error = self.error * np.ones(self.data.shape)
 
+        # Cast data and error to jnp once. astropy reads FITS data in the
+        # file's native (typically big-endian) byte order, which JAX
+        # otherwise refuses to trace.
+
+        data = jnp.asarray(self.data)
+        error = jnp.asarray(self.error)
+
         # Deprojected coordinates.
 
         r, t = self.disk_coords(**params)[:2]
-        t = abs(t) if params['abs_phi'] else t
+        t = jnp.abs(t) if params['abs_phi'] else t
 
         # Radial mask.
 
-        mask_r = np.logical_and(r >= params['r_min'], r <= params['r_max'])
-        mask_r = ~mask_r if params['exclude_r'] else mask_r
+        mask_r = jnp.logical_and(r >= params['r_min'], r <= params['r_max'])
+        mask_r = jnp.logical_not(mask_r) if params['exclude_r'] else mask_r
 
         # Azimuthal mask.
 
-        mask_p = np.logical_and(t >= np.radians(params['phi_min']),
-                                t <= np.radians(params['phi_max']))
-        mask_p = ~mask_p if params['exclude_phi'] else mask_p
+        mask_p = jnp.logical_and(t >= jnp.radians(params['phi_min']),
+                                 t <= jnp.radians(params['phi_max']))
+        mask_p = jnp.logical_not(mask_p) if params['exclude_phi'] else mask_p
 
         # Finite value mask.
 
-        mask_f = np.logical_and(np.isfinite(self.data), self.error > 0.0)
+        mask_f = jnp.logical_and(jnp.isfinite(data), error > 0.0)
 
         # Velocity mask.
 
         v_min = params.get('v_min', np.nanmin(self.data))
         v_max = params.get('v_max', np.nanmax(self.data))
-        mask_v = np.logical_and(self.data >= v_min, self.data <= v_max)
-        mask_v = ~mask_v if params['exclude_v'] else mask_v
+        mask_v = jnp.logical_and(data >= v_min, data <= v_max)
+        mask_v = jnp.logical_not(mask_v) if params['exclude_v'] else mask_v
 
         # Combine with the user_mask.
 
-        mask = np.logical_and(np.logical_and(mask_v, mask_f),
-                              np.logical_and(mask_r, mask_p))
-        mask = np.logical_and(mask, params['user_mask'])
-        return np.where(mask, np.power(self.error, -2.0), 0.0)
+        mask = jnp.logical_and(jnp.logical_and(mask_v, mask_f),
+                               jnp.logical_and(mask_r, mask_p))
+        mask = jnp.logical_and(mask, params['user_mask'])
+        return jnp.where(mask, jnp.power(error, -2.0), 0.0)
 
     @staticmethod
     def _get_labels(params):

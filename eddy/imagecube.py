@@ -945,7 +945,10 @@ class imagecube(object):
         # think of something different.
 
         self.header = fits.getheader(path)
-        self.data = np.squeeze(fits.getdata(self.path))
+        # FITS files are big-endian; coerce to native byte order so the
+        # array can flow into jax.numpy without an explicit byteswap.
+        self.data = np.ascontiguousarray(np.squeeze(fits.getdata(self.path)),
+                                         dtype=np.float64)
         if fill is not None:
             self.data = np.where(np.isfinite(self.data), self.data, fill)
 
