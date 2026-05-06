@@ -133,6 +133,80 @@ def _build_mask_jnp(rvals, pvals, r_min, r_max, phi_min, phi_max,
     return jnp.logical_and(r_mask, phi_mask)
 
 
+@jax.jit
+def _fft_convolve_jnp(image, kernel):
+    """Linear 2D convolution via FFT, matching
+    :func:`astropy.convolution.convolve_fft` for inputs without NaN.
+
+    Pixels within ``ky//2`` / ``kx//2`` of the boundary are darkened by
+    partial kernel coverage (no edge renormalisation, matching astropy's
+    default behaviour when no NaN is present). Both inputs are
+    zero-padded to ``(ny + ky - 1, nx + kx - 1)`` before the rfft so the
+    convolution does not wrap around the image edges.
+    """
+    ny, nx = image.shape
+    ky, kx = kernel.shape
+    pad_y = ny + ky - 1
+    pad_x = nx + kx - 1
+
+    img_padded = jnp.zeros((pad_y, pad_x), dtype=image.dtype).at[:ny, :nx].set(image)
+    ker_padded = jnp.zeros((pad_y, pad_x), dtype=image.dtype).at[:ky, :kx].set(kernel)
+
+    F = jnp.fft.rfft2(img_padded)
+    K = jnp.fft.rfft2(ker_padded)
+    out = jnp.fft.irfft2(F * K, s=(pad_y, pad_x))
+
+    cy = ky // 2
+    cx = kx // 2
+    return out[cy:cy + ny, cx:cx + nx]
+
+
+@jax.jit
+def _fft_convolve_nan_jnp(image, kernel):
+    """NaN-safe linear 2D convolution via FFT, matching
+    :func:`astropy.convolution.convolve_fft` with
+    ``nan_treatment='interpolate'`` and ``preserve_nan=True``.
+
+    NaN pixels are replaced with zero before the FFT. The output is
+    rescaled by ``convolve(ones, k) / convolve(mask, k)``, where ``mask``
+    is 1 at finite-image pixels and 0 at NaN-image pixels (both 0
+    outside the image as part of the zero-padding). The numerator
+    ``convolve(ones, k)`` is the same partial-coverage profile that
+    arises from the boundary, so the correction is exactly 1 at the
+    image edges (boundary darkening preserved) and >1 only near NaN
+    regions inside the image (missing data interpolated). Originally
+    NaN positions are restored to NaN at the end.
+    """
+    ny, nx = image.shape
+    ky, kx = kernel.shape
+    pad_y = ny + ky - 1
+    pad_x = nx + kx - 1
+
+    nan_mask = jnp.isnan(image)
+    image_z = jnp.where(nan_mask, jnp.zeros_like(image), image)
+    mask = (~nan_mask).astype(image.dtype)
+    ones = jnp.ones((ny, nx), dtype=image.dtype)
+
+    img_padded = jnp.zeros((pad_y, pad_x), dtype=image.dtype).at[:ny, :nx].set(image_z)
+    msk_padded = jnp.zeros((pad_y, pad_x), dtype=image.dtype).at[:ny, :nx].set(mask)
+    one_padded = jnp.zeros((pad_y, pad_x), dtype=image.dtype).at[:ny, :nx].set(ones)
+    ker_padded = jnp.zeros((pad_y, pad_x), dtype=image.dtype).at[:ky, :kx].set(kernel)
+
+    K = jnp.fft.rfft2(ker_padded)
+    num = jnp.fft.irfft2(jnp.fft.rfft2(img_padded) * K, s=(pad_y, pad_x))
+    den_mask = jnp.fft.irfft2(jnp.fft.rfft2(msk_padded) * K, s=(pad_y, pad_x))
+    den_ones = jnp.fft.irfft2(jnp.fft.rfft2(one_padded) * K, s=(pad_y, pad_x))
+
+    cy = ky // 2
+    cx = kx // 2
+    num_c = num[cy:cy + ny, cx:cx + nx]
+    den_mask_c = den_mask[cy:cy + ny, cx:cx + nx]
+    den_ones_c = den_ones[cy:cy + ny, cx:cx + nx]
+    correction = jnp.where(den_mask_c > 0, den_ones_c / den_mask_c, 1.0)
+    out = num_c * correction
+    return jnp.where(nan_mask, jnp.nan, out)
+
+
 class imagecube(object):
     """
     An ``imagecube`` instance to read in data in a ``FITS`` format. This is the
@@ -1244,10 +1318,25 @@ class imagecube(object):
 
     @staticmethod
     def _convolve_image(image, kernel, fast=True):
-        """Convolve the image with the provided kernel."""
+        """Convolve the image with the provided kernel.
+
+        With ``fast=True`` (default), uses the JIT'd FFT path. The
+        no-NaN branch matches :func:`astropy.convolution.convolve_fft`
+        on inputs without NaN; the NaN-safe branch matches astropy's
+        ``nan_treatment='interpolate'`` + ``preserve_nan=True``.
+        Returns numpy for backward compatibility. The slow path falls
+        back to :func:`astropy.convolution.convolve`.
+        """
         if fast:
-            from astropy.convolution import convolve_fft
-            return convolve_fft(image, kernel, preserve_nan=True)
+            kernel_arr = kernel.array if hasattr(kernel, 'array') else kernel
+            img_jnp = jnp.asarray(image)
+            ker_jnp = jnp.asarray(kernel_arr, dtype=img_jnp.dtype)
+            image_np = np.asarray(image)
+            if np.any(np.isnan(image_np)):
+                result = _fft_convolve_nan_jnp(img_jnp, ker_jnp)
+            else:
+                result = _fft_convolve_jnp(img_jnp, ker_jnp)
+            return np.asarray(result)
         from astropy.convolution import convolve
         return convolve(image, kernel, preserve_nan=True)
 
