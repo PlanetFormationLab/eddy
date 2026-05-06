@@ -161,16 +161,18 @@ from .annulus import Annulus3D as annulus   # preserve existing import
 
 ## Phase 2 — JAX Migration
 
-**Goal: replace numpy with jax.numpy in compute-heavy paths; JIT-compile hot functions.**
+**Goal: convert compute-heavy paths to `jax.numpy`, JIT-compile the rotationmap model + likelihood, swap celerite → tinygp for the GP annulus path, and add autodiff to the pre-MCMC optimizer.**
+
+A read-only survey of the codebase (Phase 2 prep) showed the original plan undersold the work in three places: there is no canonical `keplerian_profile()` function (the velocity model is a user callable in `params['vfunc']`); the GP path uses **celerite**, which is not JAX-compatible; and beam convolution in `_make_model` uses scipy. The phases below are revised to match the actual code.
 
 ### 2.1 Dependencies
 
-Add to `pyproject.toml`:
+Already added to `pyproject.toml` (commit `71754d1`):
 ```toml
 "jax>=0.4",
 "jaxlib>=0.4",
 ```
-Keep `numpy` as a dependency (needed for FITS I/O boundary via astropy).
+For 2.6 add `"tinygp>=0.3"` and drop `celerite` if no other code path needs it (pending audit).
 
 ### 2.2 Strategy: JAX at compute boundaries
 
@@ -187,34 +189,81 @@ self.data = jnp.array(numpy_data_from_fits)
 return np.asarray(result)   # for numpy-expecting downstream users
 ```
 
-### 2.3 JIT-compile hot functions
+### 2.3 JAX-trace + JIT the rotationmap model
 
-In `modelling.py`, wrap all model evaluation with `@jax.jit`:
-- `keplerian_profile()` — disk rotation model
-- `_get_velocity_model()` in `rotationmap`
-- Likelihood functions in `rotationmap.fit_map()` and `Annulus3D.get_vlos_GP()`
+The hot path during sampling and pre-MCMC optimization is `rotationmap._ln_probability` → `_ln_likelihood` → `_make_model` → `disk_coords`. Conversion order:
 
-In `imagecube.py`, JIT coordinate transforms:
-- `disk_coords()`
-- `_get_mask()`
+1. **`imagecube.disk_coords` and its helpers** (`_get_midplane_polar_coords`, `_get_conical_polar_coords`, `_get_flared_coords`, `_get_shadowed_coords`).
+   - The flared path is a fixed-point iteration `flared_niter=5×`; rewrite using `jax.lax.fori_loop`.
+   - Branches on `z0`/`psi`/`z_func`/`shadowed` are static at trace time, so they remain Python-level `if`s.
+   - The default analytic surface (when `z_func` is `None`) becomes a `jnp` lambda over `z0`, `psi`, `r_cavity`, `r_taper`, `q_taper` and is JIT-friendly.
+   - User-supplied `z_func` callables can be arbitrary Python — see "z_func wrapper" below.
 
-### 2.4 Autodiff for optimization
+2. **`rotationmap._proj_vphi`, `_make_model_vortex`, `_make_model`** — port to `jnp`. The user `vfunc` (Keplerian, etc.) is also a callable from `params`; same trace-vs-jit concern as `z_func`.
 
-Replace `scipy.optimize.minimize` (which uses finite-difference Jacobians) with JAX-native optimization using `jax.grad`:
+3. **`imagecube._convolve_image`** — see "JAX FFT convolution" below.
+
+4. **`rotationmap._ln_likelihood`** — chi-squared. Trivial once `_make_model` is jnp.
+
+5. **`rotationmap._ln_prior`** — small Python loop over priors; leave as numpy (cost is negligible vs. the model build).
+
+#### z_func / vfunc wrapper
+
+Users can pass arbitrary callables for the emission surface (`z_func`) and the rotation profile (`vfunc`). Provide a thin dispatcher that JITs only when both are `None`:
 
 ```python
-# before — finite-difference gradients
-from scipy.optimize import minimize
-result = minimize(nll, p0, method='Nelder-Mead')
+# imagecube.py / rotationmap.py
+from functools import lru_cache
+import jax
 
-# after — exact analytic gradients via autodiff
-from jax import grad, jit
-grad_nll = jit(grad(nll))
-# use with scipy L-BFGS-B (accepts analytic gradients) or optax
-result = minimize(nll, p0, jac=grad_nll, method='L-BFGS-B')
+@lru_cache(maxsize=8)
+def _jit_disk_coords_default():
+    """Compile a JIT'd disk_coords for the default analytic surface."""
+    return jax.jit(_disk_coords_default_impl)
+
+def disk_coords(self, ..., z_func=None, ...):
+    if z_func is None:
+        return _jit_disk_coords_default()(self.xaxis, self.yaxis, x0, y0,
+                                          inc, PA, z0, psi, r_cavity,
+                                          r_taper, q_taper, shadowed)
+    # User callable: trace at call time (slower, but correct).
+    return _disk_coords_traced(self.xaxis, self.yaxis, ..., z_func)
 ```
 
-This replaces the pre-MCMC `optimize=True` step in `fit_map` and the `scipy.optimize.minimize` calls in `get_vlos_dV` and `get_vlos_SNR`.
+Same pattern for `_make_model` based on whether `params['vfunc']` is a known JAX-traceable function. Document that custom user callables hit the slower path unless they're written in `jnp`.
+
+#### JAX FFT convolution
+
+Replacement for `imagecube._convolve_image` — wraps both image and kernel via FFT:
+
+```python
+# imagecube.py
+import jax.numpy as jnp
+from jax.numpy.fft import rfft2, irfft2
+
+def _fft_convolve(image, kernel):
+    """2D FFT convolution; both inputs assumed to be jnp arrays of the
+    same shape (kernel pre-padded and centered). Returns a real array."""
+    return jnp.fft.fftshift(
+        irfft2(rfft2(image) * rfft2(kernel), s=image.shape)
+    )
+```
+
+The current `_beamkernel` already produces a kernel sized to the image; only the convolution step needs swapping. For non-square images, pad kernel to image shape before the FFT. Direct (non-FFT) convolution via `jax.scipy.signal.convolve2d` is also an option but is O(N²·K²) vs FFT's O(N²·log N) — FFT wins for the typical beam kernel size.
+
+### 2.4 Autodiff for the pre-MCMC optimizer
+
+Replace `rotationmap._optimize_p0`'s `minimize(method='TNC')` (finite-difference Jacobians) with `L-BFGS-B` + analytic gradient via `jax.grad(nlnL)`:
+
+```python
+def _optimize_p0(self, theta, params, **kwargs):
+    nlnL = lambda t: -self._ln_probability(t, params)
+    grad_nlnL = jax.jit(jax.grad(nlnL))
+    res = minimize(nlnL, x0=theta, jac=grad_nlnL, method='L-BFGS-B', ...)
+    ...
+```
+
+Annulus3D's `get_vlos_dV` and `get_vlos_SNR` are intentionally **left on Nelder-Mead** — their objectives involve spectral binning that is awkward in JAX, and Nelder-Mead is gradient-free so autodiff offers no win there. (Removed from this phase.)
 
 ### 2.5 GPU support
 
@@ -226,6 +275,17 @@ import jax
 def _get_backend():
     return jax.default_backend()   # 'cpu' or 'gpu'
 ```
+
+### 2.6 celerite → tinygp swap (Annulus3D GP path)
+
+`Annulus3D.get_vlos_GP` and its helpers currently build a `celerite.GP` with a `terms.Matern32Term` (or similar) kernel and call `gp.log_likelihood`. celerite is not JAX-compatible, and its author's recommended successor for JAX use is **tinygp**.
+
+Migration:
+
+- Add `tinygp` to `pyproject.toml` dependencies; drop `celerite` once nothing else uses it (audit first).
+- Replace `_build_kernel` with the tinygp equivalent. The Matérn-3/2 kernel maps directly: `tinygp.kernels.quasisep.Matern32(scale=ell) * sigma**2`.
+- `gp.log_likelihood(y)` → `tinygp.GaussianProcess(kernel, x).log_probability(y)`.
+- Once converted, the `_lnlikelihood` / `_lnprobability` methods become JAX-traceable and benefit from `@jit`, and the MCMC step in `get_vlos_GP` will compose with Phase 3's numpyro NUTS sampler.
 
 ---
 
@@ -344,8 +404,10 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 1.3–1.4 | Update `rotationmap`, `linecube` inheritance | Low | Clean up hierarchy |
 | 1.5 | `Annulus` base + `Annulus2D` / `Annulus3D` | Medium | Enables 2D annulus fitting |
 | 4.1 | `to_fits()` | Low | Immediate user value |
-| 2.1–2.3 | JAX backend in `modelling.py` | High | Perf + autodiff |
-| 2.4 | Autodiff optimization | Medium | Faster `fit_map` init |
+| 2.1 | jax/jaxlib dependency | Trivial | Enables 2.3+ |
+| 2.3 | JAX-trace + JIT `disk_coords` and `_make_model` (incl. FFT convolution) | High | Foundation for autodiff and GPU |
+| 2.4 | Autodiff for pre-MCMC `_optimize_p0` | Medium | Faster `fit_map` init |
+| 2.6 | celerite → tinygp swap for GP annulus | High | Unblocks JIT for GP path; numpyro-friendly |
 | 3.1–3.5 | numpyro NUTS sampler | High | Core sampling improvement |
 | 2.5 | GPU support | Low | Free via JAX |
 | 4.2 | `to_momentmap()` | Medium | Convenience |
