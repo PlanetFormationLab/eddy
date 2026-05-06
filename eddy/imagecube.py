@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import os
+from functools import partial
+
 import numpy as np
+import jax
+import jax.numpy as jnp
 from astropy.io import fits
 import scipy.constants as sc
 import matplotlib.pyplot as plt
@@ -9,6 +13,109 @@ from matplotlib.ticker import MaxNLocator, MultipleLocator
 import warnings
 
 warnings.filterwarnings("ignore")
+
+
+# ----------------------------------------------------------------------------
+# JAX-traceable pixel deprojection.
+#
+# These module-level helpers mirror the corresponding ``imagecube._get_*``
+# instance methods (midplane / conical / flared with the default analytic
+# emission surface) but use ``jnp`` throughout so they can be traced and
+# JIT-compiled. The shadowed branch stays on numpy because it relies on
+# ``scipy.interpolate.griddata``, which is not JAX-compatible.
+# ----------------------------------------------------------------------------
+
+
+@jax.jit
+def _midplane_polar_jnp(xaxis, yaxis, x0, y0, inc, PA):
+    """Polar disk-frame coords of the midplane. Mirrors
+    ``imagecube._get_midplane_polar_coords``."""
+    x_sky, y_sky = jnp.meshgrid(xaxis - x0, yaxis - y0)
+    cos_pa = jnp.cos(jnp.radians(PA))
+    sin_pa = jnp.sin(jnp.radians(PA))
+    x_rot = y_sky * cos_pa + x_sky * sin_pa
+    y_rot = x_sky * cos_pa - y_sky * sin_pa
+    y_dep = y_rot / jnp.cos(jnp.radians(inc))
+    return jnp.hypot(y_dep, x_rot), jnp.arctan2(y_dep, x_rot)
+
+
+@jax.jit
+def _conical_polar_jnp(xaxis, yaxis, x0, y0, inc, PA, z0):
+    """Polar disk-frame coords of a conical surface. Mirrors
+    ``imagecube._get_conical_polar_coords``."""
+    inc_rad = jnp.radians(inc)
+    PA_rad = jnp.radians(PA - 90.0)
+    x_sky, y_sky = jnp.meshgrid(xaxis - x0, yaxis - y0)
+    cos_pa = jnp.cos(PA_rad)
+    sin_pa = jnp.sin(PA_rad)
+    x_rot = x_sky * cos_pa - y_sky * sin_pa
+    y_rot = x_sky * sin_pa + y_sky * cos_pa
+    psi = jnp.tan(z0)
+    sin_psi_sq = jnp.sin(psi) ** 2
+    a = jnp.cos(2 * inc_rad) + jnp.cos(2 * psi)
+    b = -4.0 * sin_psi_sq * y_rot * jnp.tan(inc_rad)
+    c = -2.0 * sin_psi_sq * (x_rot ** 2 + y_rot ** 2 / jnp.cos(inc_rad) ** 2)
+    t = -b + jnp.sqrt(b ** 2 - 4 * a * c) / 2 / a
+    x_d = x_rot
+    y_d = y_rot / jnp.cos(inc_rad) + t * jnp.sin(inc_rad)
+    z_d = z0 * jnp.hypot(x_d, y_d)
+    return jnp.hypot(y_d, x_d), jnp.arctan2(y_d, x_d), z_d
+
+
+def _analytic_z(r, z0, psi, r_cavity, r_taper, q_taper):
+    """Default analytic emission surface used by ``disk_coords``.
+    ``np.clip(r - r_cavity, 0, None)`` becomes ``jnp.maximum(...)``."""
+    r_eff = jnp.maximum(r - r_cavity, 0.0)
+    return z0 * r_eff ** psi * jnp.exp(-jnp.power(r_eff / r_taper, q_taper))
+
+
+@partial(jax.jit, static_argnames=('niter',))
+def _flared_polar_default_jnp(xaxis, yaxis, x0, y0, inc, PA,
+                              z0, psi, r_cavity, r_taper, q_taper, niter):
+    """Polar coords for a flared analytic surface. Mirrors
+    ``imagecube._get_flared_coords`` with the default ``z_func``. The
+    fixed-point iteration in the original is replaced by ``lax.fori_loop``;
+    ``niter`` is static so the loop unrolls deterministically."""
+    x_sky, y_sky = jnp.meshgrid(xaxis - x0, yaxis - y0)
+    cos_pa = jnp.cos(jnp.radians(PA))
+    sin_pa = jnp.sin(jnp.radians(PA))
+    x_mid = y_sky * cos_pa + x_sky * sin_pa
+    y_rot = x_sky * cos_pa - y_sky * sin_pa
+    y_mid = y_rot / jnp.cos(jnp.radians(inc))
+    tan_inc = jnp.tan(jnp.radians(inc))
+
+    def body(_, state):
+        r, _y = state
+        z = _analytic_z(r, z0, psi, r_cavity, r_taper, q_taper)
+        y_new = y_mid + z * tan_inc
+        return (jnp.hypot(y_new, x_mid), y_new)
+
+    r_init = jnp.hypot(x_mid, y_mid)
+    r_final, y_final = jax.lax.fori_loop(0, niter, body, (r_init, y_mid))
+    z_final = _analytic_z(r_final, z0, psi, r_cavity, r_taper, q_taper)
+    return r_final, jnp.arctan2(y_final, x_mid), z_final
+
+
+def _flared_polar_user_jnp(xaxis, yaxis, x0, y0, inc, PA, z_func, niter):
+    """Same iteration as :func:`_flared_polar_default_jnp` but with an
+    arbitrary user ``z_func``. Not pre-JITted: the user's callable may use
+    ``np`` rather than ``jnp``, in which case JAX will fall back to host
+    execution and a host transfer per call. If the user's ``z_func`` is
+    pure ``jnp`` they can wrap this with their own ``jax.jit``."""
+    x_sky, y_sky = jnp.meshgrid(xaxis - x0, yaxis - y0)
+    cos_pa = jnp.cos(jnp.radians(PA))
+    sin_pa = jnp.sin(jnp.radians(PA))
+    x_mid = y_sky * cos_pa + x_sky * sin_pa
+    y_rot = x_sky * cos_pa - y_sky * sin_pa
+    y_mid = y_rot / jnp.cos(jnp.radians(inc))
+    tan_inc = jnp.tan(jnp.radians(inc))
+
+    r_tmp = jnp.hypot(x_mid, y_mid)
+    y_tmp = y_mid
+    for _ in range(niter):
+        y_tmp = y_mid + z_func(r_tmp) * tan_inc
+        r_tmp = jnp.hypot(y_tmp, x_mid)
+    return r_tmp, jnp.arctan2(y_tmp, x_mid), z_func(r_tmp)
 
 
 class imagecube(object):
@@ -158,23 +265,35 @@ class imagecube(object):
 
         inc = inc if inc < 90.0 else inc - 180.0
 
-        # Cycle through the different options for pixel deprojection.
+        # Dispatch by branch. The non-shadowed paths use module-level
+        # JAX-traceable helpers; the shadowed branch stays on numpy because
+        # it relies on scipy.interpolate.griddata.
 
-        if z0 is None and z_func is None:
-            r, t = self._get_midplane_polar_coords(x0, y0, inc, PA)
-            z = np.zeros(r.shape)
-        elif psi is None and z_func is None:
-            r, t, z = self._get_conical_polar_coords(x0, y0, inc, PA, z0)
-        else:
+        if shadowed:
             if z_func is None:
-                r_taper = np.inf if r_taper is None else r_taper
-                def z_func(r_in):
+                r_taper_v = np.inf if r_taper is None else r_taper
+                def z_func(r_in, z0=z0, psi=psi, r_cavity=r_cavity,
+                           r_taper=r_taper_v, q_taper=q_taper):
                     r = np.clip(r_in - r_cavity, a_min=0.0, a_max=None)
                     return z0 * r**psi * np.exp(-np.power(r/r_taper, q_taper))
-            if shadowed:
-                r, t, z = self._get_shadowed_coords(x0, y0, inc, PA, z_func)
-            else:
-                r, t, z = self._get_flared_coords(x0, y0, inc, PA, z_func)
+            r, t, z = self._get_shadowed_coords(x0, y0, inc, PA, z_func)
+        elif z_func is not None:
+            r, t, z = _flared_polar_user_jnp(self.xaxis, self.yaxis, x0, y0,
+                                             inc, PA, z_func,
+                                             self.flared_niter)
+        elif z0 is None:
+            r, t = _midplane_polar_jnp(self.xaxis, self.yaxis, x0, y0, inc, PA)
+            z = jnp.zeros_like(r)
+        elif psi is None:
+            r, t, z = _conical_polar_jnp(self.xaxis, self.yaxis, x0, y0,
+                                         inc, PA, z0)
+        else:
+            r_taper_v = jnp.inf if r_taper is None else r_taper
+            r, t, z = _flared_polar_default_jnp(self.xaxis, self.yaxis,
+                                                x0, y0, inc, PA,
+                                                z0, psi, r_cavity,
+                                                r_taper_v, q_taper,
+                                                self.flared_niter)
 
         # Return the values.
 
@@ -184,7 +303,7 @@ class imagecube(object):
             z = z.flatten()
         if outframe == 'cylindrical':
             return r, t, z
-        return r * np.cos(t), r * np.sin(t), z
+        return r * jnp.cos(t), r * jnp.sin(t), z
 
     def disk_to_sky(self, coords, x0=0.0, y0=0.0, inc=0.0, PA=0.0,
                     frame='cylindrical'):
