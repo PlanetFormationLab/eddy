@@ -452,7 +452,7 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 4.2 | `to_momentmap()` | Medium | ⏭ Stubbed with `NotImplementedError` |
 | 5.1 | Tutorial-scale Phase 3 validation | Low | ✅ Done — emcee/numpyro medians agree to within 0.2σ on all 9 params (HD163296 3D fit, 128 walkers × 1000+1000 vs. 1 chain × 500+500). Surfaced & fixed three latent JAX-autodiff bugs along the way. |
 | 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ⏭ Pending |
-| 5.3 | Remove dead `rotationmap._fit_SHO` helper | Trivial | ⏭ Pending |
+| 5.3 | Remove dead `_SHO_*` helpers (`_fit_SHO`, `_SHO_chi2`, `_SHO_MCMC`, `_SHO_ln_*`) | Trivial | ✅ Done — ~140 lines deleted; `set_SHO_prior` / `SHO_priors` retained for backward compat |
 | 5.4 | Tighten / scope the global `warnings.filterwarnings("ignore")` | Low | ✅ Done — the global filter was hiding only three real bugs; all fixed at the source. No filter needed; orphan `import warnings` lines removed. |
 | 5.5 | Minimal pytest smoke suite | Medium | ⏭ Pending — repo currently has no automated tests |
 
@@ -546,9 +546,16 @@ samples = cube.fit_map(p0=p0, params=params, mcmc='numpyro',
 
 Mention that `nwalkers/nburnin/nsteps` map onto `num_chains/num_warmup/num_samples` internally and that NUTS is generally preferred for high-dimensional fits where emcee's autocorrelation time becomes painful.
 
-### 5.3 Remove `rotationmap._fit_SHO`
+### 5.3 Remove dead `_SHO_*` helpers — done 2026-05-08
 
-[`rotationmap._fit_SHO`](eddy/rotationmap.py) became dead code in Phase 1.3 when `fit_annuli` was rewired through `Annulus2D.get_vlos`. The Phase 1 notes flagged it as "left in place for now to avoid breaking any external callers depending on the private helper." Since it's a leading-underscore private, removal is safe; do it in a standalone cleanup commit.
+Audited the SHO codepaths: `_fit_SHO` was the named target, but the same Phase 1.3 rewire orphaned the entire `_SHO_*` private family. Specifically these methods had no remaining callers (verified by `grep -rn` across `eddy/`, `docs/`, and `paper/`):
+
+- `_fit_SHO` — the duplicate of `Annulus2D.get_vlos_SHO` flagged in Phase 1.3.
+- `_SHO_chi2`
+- `_SHO_MCMC` (gated unreachable anyway: `fit_annuli(MCMC=True)` raises `NotImplementedError` before it would dispatch).
+- `_SHO_ln_probability`, `_SHO_ln_prior`, `_SHO_ln_likelihood` — the MCMC log-density chain only `_SHO_MCMC` referenced.
+
+All six removed in a single commit (~140 lines). Smoke-tested afterwards: `fit_map` under emcee and numpyro and `fit_annuli` (the SHO 2D path on HD163296) all behave identically to before. The public surface — `set_SHO_prior` and the class-level `SHO_priors` dict — is intentionally retained for backward compatibility, even though removing the consumers means it now writes to a dict no one reads. Flagging this as a follow-up to consider once Phase 3.6 (numpyro for `Annulus3D.get_vlos_GP`) decides whether the SHO MCMC machinery should come back in numpyro form or stay retired.
 
 ### 5.4 Scope the global `warnings.filterwarnings("ignore")` — done 2026-05-08
 
