@@ -450,7 +450,7 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 3.3–3.5 | numpyro NUTS sampler for `fit_map` (model, runner, internal kwarg mapping) | High | ✅ Done — emcee/numpyro medians agree to within sampling noise on a 5-param HD163296 smoke fit (Δmstar ≈ 0.07, ΔPA ≈ 0.2°, Δvlsr ≈ 7 m/s) |
 | 3.6 | numpyro NUTS for `Annulus3D.get_vlos_GP` | Medium-high | ⏭ Deferred (needs `_lnprior` refactor first) |
 | 4.2 | `to_momentmap()` | Medium | ⏭ Stubbed with `NotImplementedError` |
-| 5.1 | Tutorial-scale Phase 3 validation | Low | 🔶 Partial — wiring proven on 9-param HD163296 fit; uncovered & fixed three latent JAX-autodiff bugs (`_analytic_z`, `_ln_likelihood`, improper-uniform priors). Posterior comparison inconclusive at the budget tested (emcee chain undersampled). 5.1b: rerun at tutorial-2 scale. |
+| 5.1 | Tutorial-scale Phase 3 validation | Low | ✅ Done — emcee/numpyro medians agree to within 0.2σ on all 9 params (HD163296 3D fit, 128 walkers × 1000+1000 vs. 1 chain × 500+500). Surfaced & fixed three latent JAX-autodiff bugs along the way. |
 | 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ⏭ Pending |
 | 5.3 | Remove dead `rotationmap._fit_SHO` helper | Trivial | ⏭ Pending |
 | 5.4 | Tighten / scope the global `warnings.filterwarnings("ignore")` | Low | ⏭ Pending (only matters once we want to surface deprecation warnings) |
@@ -508,7 +508,31 @@ What this validation actually establishes:
 - ✅ The earlier 5-param HD163296 2D smoke test (Phase 3 work) showed the two backends agree to within sampling noise, so the wiring is statistically sound for low-dimensional fits.
 - ❌ A clean "medians/percentiles match in 9-D" demonstration. Achieving that requires either (a) a much longer emcee chain (128 walkers × 5000+ samples — closer to what tutorial 2 actually uses) or (b) confirming numpyro's answer against an external reference fit. Both are >>10 min runs and out of budget for a single session.
 
-**Recommended follow-up (5.1b):** rerun once with emcee at tutorial-2 scale (128 walkers × 1000 burnin × 1000 sample, ≈ 8–10 min) and numpyro with the same `r_taper` ceiling. If the posteriors then match to within sampling noise, mark 5.1 fully resolved; if not, the discrepancy is a real model bug we need to find.
+**Follow-up 5.1b — resolved 2026-05-08.** Reran with proper budgets:
+
+- emcee: 128 walkers × (1000 burnin + 1000 sample) → 128 000 samples, 633 s.
+- numpyro NUTS: 1 chain × (500 warmup + 500 sample), `max_tree_depth=8` → 500 samples, 865 s.
+
+Both with the `r_taper ∈ (0, 50)` ceiling so priors are identical.
+
+| param | emcee 16/50/84 | numpyro 16/50/84 | \|Δmed\|/σ | σ_n/σ_e |
+|---|---|---|---|---|
+| x0      | −0.0462 / −0.04572 / −0.04524 | −0.04615 / −0.04566 / −0.04515 | 0.11 | 1.06 |
+| y0      | −0.0364 / −0.03589 / −0.03537 | −0.03631 / −0.03583 / −0.03531 | 0.13 | 0.96 |
+| PA      |  312.6 /  312.6 /  312.6 |  312.6 /  312.6 /  312.6 | 0.04 | 0.97 |
+| mstar   |  1.904 /  1.905 /  1.906 |  1.904 /  1.905 /  1.906 | 0.16 | 1.08 |
+| vlsr    |  5771 /  5771 /  5771 |  5771 /  5771 /  5771 | 0.03 | 1.04 |
+| z0      |  0.1789 /  0.1799 /  0.1809 |  0.1789 /  0.1799 /  0.1811 | 0.02 | 1.09 |
+| psi     |  1.971 /  1.995 /  2.019 |  1.968 /  1.991 /  2.017 | 0.18 | 1.05 |
+| r_taper |  3.022 /  3.060 /  3.096 |  3.027 /  3.067 /  3.101 | 0.20 | 1.01 |
+| q_taper |  2.37 /  2.414 /  2.459 |  2.373 /  2.42 /  2.465 | 0.13 | 1.04 |
+
+Every median is within 0.2σ of emcee; posterior widths agree to within 9 %. The 5.1 disagreement was undersampled emcee, not a wiring bug. Note that numpyro reached the same posterior resolution with 256× fewer samples (500 vs 128 000) but at 1.4× the wall time — NUTS trades sample efficiency for per-step cost.
+
+**Practical guidance for users (to surface in 5.2):**
+- For high-dim 3D fits, `mcmc='numpyro'` with `nwalkers=1, nburnin=500, nsteps=500, mcmc_kwargs={'max_tree_depth': 8}` produces a comparable posterior to `mcmc='emcee'` with `nwalkers=128, nburnin=1000, nsteps=1000`, but takes longer in wall time.
+- Tighten any `(lo, inf)` priors (e.g. default `r_taper`) to a finite ceiling before sampling with NUTS — the unconstrained transform of an unbounded uniform is poorly conditioned and trees explode to 1024 leapfrog steps.
+- `max_tree_depth=8` (cap at 256 leapfrog steps per NUTS iteration) is a good default for this model class; the default 10 (cap 1024) doubles wall time without measurable improvement.
 
 ### 5.2 Tutorial showing `mcmc='numpyro'`
 
