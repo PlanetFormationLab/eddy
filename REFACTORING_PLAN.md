@@ -451,7 +451,7 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 3.6 | numpyro NUTS for `Annulus3D.get_vlos_GP` | Medium-high | ⏭ Deferred (needs `_lnprior` refactor first) |
 | 4.2 | `to_momentmap()` | Medium | ⏭ Stubbed with `NotImplementedError` |
 | 5.1 | Tutorial-scale Phase 3 validation | Low | ✅ Done — emcee/numpyro medians agree to within 0.2σ on all 9 params (HD163296 3D fit, 128 walkers × 1000+1000 vs. 1 chain × 500+500). Surfaced & fixed three latent JAX-autodiff bugs along the way. |
-| 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ⏭ Pending |
+| 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ✅ Done — `docs/tutorials/tutorial_6_numpyro.ipynb` mirroring tutorial 2's HD163296 setup; wired into `docs/index.rst` |
 | 5.3 | Remove dead `_SHO_*` helpers (`_fit_SHO`, `_SHO_chi2`, `_SHO_MCMC`, `_SHO_ln_*`) | Trivial | ✅ Done — ~140 lines deleted; `set_SHO_prior` / `SHO_priors` retained for backward compat |
 | 5.4 | Tighten / scope the global `warnings.filterwarnings("ignore")` | Low | ✅ Done — the global filter was hiding only three real bugs; all fixed at the source. No filter needed; orphan `import warnings` lines removed. |
 | 5.5 | Minimal pytest smoke suite | Medium | ⏭ Pending — repo currently has no automated tests |
@@ -534,17 +534,18 @@ Every median is within 0.2σ of emcee; posterior widths agree to within 9 %. The
 - Tighten any `(lo, inf)` priors (e.g. default `r_taper`) to a finite ceiling before sampling with NUTS — the unconstrained transform of an unbounded uniform is poorly conditioned and trees explode to 1024 leapfrog steps.
 - `max_tree_depth=8` (cap at 256 leapfrog steps per NUTS iteration) is a good default for this model class; the default 10 (cap 1024) doubles wall time without measurable improvement.
 
-### 5.2 Tutorial showing `mcmc='numpyro'`
+### 5.2 Tutorial showing `mcmc='numpyro'` — done 2026-05-08
 
-Once 5.1 is in hand, update one tutorial (or add a new short one) demonstrating the opt-in NUTS path:
+Added [`docs/tutorials/tutorial_6_numpyro.ipynb`](docs/tutorials/tutorial_6_numpyro.ipynb): a short standalone notebook that mirrors tutorial 2's HD163296 setup but runs through the numpyro path. Sections:
 
-```python
-samples = cube.fit_map(p0=p0, params=params, mcmc='numpyro',
-                       nwalkers=2, nburnin=1000, nsteps=1000,
-                       mcmc_kwargs={'progress': False, 'seed': 0})
-```
+- *Why use numpyro?* — quick comparison of emcee vs NUTS sample efficiency vs wall time.
+- *Setup* — the same data download as tutorial 2 (no new files shipped).
+- *Tightening unbounded priors* — explains the unconstrained-transform issue with default `r_taper=(0,inf)` and bounds it to 50″.
+- *Setting up the fit* — identical params dict / `p0` to tutorial 2's 9-param 3D fit.
+- *Running the fit* — `mcmc='numpyro'` with `mcmc_kwargs` documented (seed, progress, `max_tree_depth=8`, `chain_method`); kwarg-name mapping (`nwalkers→num_chains`, etc.) tabulated.
+- *When to choose which backend* — rule-of-thumb pulled from the 5.1b validation results.
 
-Mention that `nwalkers/nburnin/nsteps` map onto `num_chains/num_warmup/num_samples` internally and that NUTS is generally preferred for high-dimensional fits where emcee's autocorrelation time becomes painful.
+Wired into [`docs/index.rst`](docs/index.rst) under the existing Tutorials toctree as the 7th entry. Notebook is committed without executed outputs (each demo fit takes ~15 min; users execute themselves). All input cells were validated end-to-end against the live code via a tiny 5-param dry-run; the full 9-param fit_map call is unchanged from the validated tutorial-2 setup.
 
 ### 5.3 Remove dead `_SHO_*` helpers — done 2026-05-08
 
