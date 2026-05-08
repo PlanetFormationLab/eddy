@@ -8,9 +8,6 @@ from matplotlib.ticker import MultipleLocator
 
 from .imagecube import imagecube
 from .annulus import annulus
-import warnings
-
-warnings.filterwarnings("ignore")
 
 
 class linecube(imagecube):

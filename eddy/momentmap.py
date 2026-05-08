@@ -1,13 +1,9 @@
 # -*- coding: utf-8 -*-
 
-import warnings
-
 import numpy as np
 
 from .imagecube import imagecube
 from .annulus import Annulus2D
-
-warnings.filterwarnings("ignore")
 
 
 class momentmap(imagecube):

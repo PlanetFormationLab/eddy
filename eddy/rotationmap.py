@@ -14,8 +14,6 @@ from .helper_functions import plot_walkers, plot_corner, random_p0
 import matplotlib.pyplot as plt
 import warnings
 
-warnings.filterwarnings("ignore")
-
 try:
     import numpyro  # noqa: F401
     _HAS_NUMPYRO = True
@@ -256,12 +254,11 @@ class rotationmap(momentmap):
                                      nsteps=nsteps[n % nsteps.size],
                                      mcmc=mcmc, **mcmc_kwargs)
 
-            if type(params_tmp['PA']) is int:
-                sampler.chain[:, :, params_tmp['PA']] %= 360.0
-
             # Split off the samples.
 
             samples = sampler.get_chain(discard=nburnin[-1], flat=True)
+            if type(params_tmp['PA']) is int:
+                samples[:, params_tmp['PA']] %= 360.0
             p0 = np.median(samples, axis=0)
             medians = rotationmap._populate_dictionary(p0, params.copy())
             medians = self.verify_params_dictionary(medians)
@@ -275,8 +272,14 @@ class rotationmap(momentmap):
             plots = []
         if 'walkers' in plots:
             if mcmc == 'emcee':
-                walkers = sampler.chain.T
+                # emcee 3.x deprecates sampler.chain in favour of get_chain;
+                # transpose (nsteps, nwalkers, ndim) -> (ndim, nsteps, nwalkers)
+                walkers = np.transpose(sampler.get_chain(), (2, 0, 1))
             else:
+                # zeus and the numpyro adapter expose a writable .chain;
+                # zeus.chain is (nsteps, nwalkers, ndim) and the adapter is
+                # (num_chains, total_steps, ndim) -- both reduce to
+                # (ndim, ..., nwalkers/num_chains) via rollaxis(2).
                 walkers = np.rollaxis(sampler.chain.copy(), 2)
             plot_walkers(walkers, nburnin[-1], labels)
         if 'corner' in plots:
@@ -761,7 +764,14 @@ class rotationmap(momentmap):
             raise ValueError("type must be 'flat' or 'gaussian'.")
         if type == 'flat':
             lo, hi = float(min(args)), float(max(args))
-            log_density = max(-100.0, np.log(1.0 / (hi - lo)))
+            width = hi - lo
+            # Improper-uniform priors (one bound at +/- inf) have an
+            # undefined normalisation; fall back to the same -100 floor
+            # used for very wide proper priors.
+            if np.isfinite(width) and width > 0:
+                log_density = max(-100.0, -np.log(width))
+            else:
+                log_density = -100.0
             def prior(p):
                 if not lo <= p <= hi:
                     return -np.inf
@@ -1871,7 +1881,7 @@ class rotationmap(momentmap):
     def remove_hot_pixels(self, npix=2, nsigma=1.0, niter=1, replace=True):
         """
         Remove hot pixels from the data. Hot pixels are identified by deviating
-        from the mean of the region +\- `npix` by an amount of at least `nsigma` 
+        from the mean of the region +/- `npix` by an amount of at least `nsigma`
         times the standard deviation of the region. These hot pixels are
         replaced by interpolated (using a box kernel convolution) values.
 

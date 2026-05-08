@@ -453,7 +453,7 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 5.1 | Tutorial-scale Phase 3 validation | Low | ✅ Done — emcee/numpyro medians agree to within 0.2σ on all 9 params (HD163296 3D fit, 128 walkers × 1000+1000 vs. 1 chain × 500+500). Surfaced & fixed three latent JAX-autodiff bugs along the way. |
 | 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ⏭ Pending |
 | 5.3 | Remove dead `rotationmap._fit_SHO` helper | Trivial | ⏭ Pending |
-| 5.4 | Tighten / scope the global `warnings.filterwarnings("ignore")` | Low | ⏭ Pending (only matters once we want to surface deprecation warnings) |
+| 5.4 | Tighten / scope the global `warnings.filterwarnings("ignore")` | Low | ✅ Done — the global filter was hiding only three real bugs; all fixed at the source. No filter needed; orphan `import warnings` lines removed. |
 | 5.5 | Minimal pytest smoke suite | Medium | ⏭ Pending — repo currently has no automated tests |
 
 ---
@@ -550,9 +550,17 @@ Mention that `nwalkers/nburnin/nsteps` map onto `num_chains/num_warmup/num_sampl
 
 [`rotationmap._fit_SHO`](eddy/rotationmap.py) became dead code in Phase 1.3 when `fit_annuli` was rewired through `Annulus2D.get_vlos`. The Phase 1 notes flagged it as "left in place for now to avoid breaking any external callers depending on the private helper." Since it's a leading-underscore private, removal is safe; do it in a standalone cleanup commit.
 
-### 5.4 Scope the global `warnings.filterwarnings("ignore")`
+### 5.4 Scope the global `warnings.filterwarnings("ignore")` — done 2026-05-08
 
-`imagecube.py`, `linecube.py`, `momentmap.py`, and `rotationmap.py` all start with `warnings.filterwarnings("ignore")` at module import. This is broad and silences warnings that aren't ours (jax, scipy, astropy). Phase 3.3 decided to leave it alone since we are not currently emitting deprecation warnings, but if a future phase does (kwarg renames, behaviour changes), the filter must be either removed or scoped via `warnings.catch_warnings()` + targeted `simplefilter` calls inside the noisy code paths.
+Investigation: removed the four `warnings.filterwarnings("ignore")` calls (one per `imagecube`/`linecube`/`momentmap`/`rotationmap`) and ran a representative session that imports eddy, loads a cube, and runs `fit_map` under both backends. The global filter was hiding only **three** real warnings — none of them justifying a process-wide silence:
+
+1. **SyntaxWarning** at `rotationmap.remove_hot_pixels` docstring — `+\-` (invalid escape sequence). Fixed by writing `+/-` instead.
+2. **RuntimeWarning** in `set_prior` — `np.log(1.0 / (hi - lo))` when `hi = inf` divides by zero. Fixed by branching: finite range gets `-log(width)`, otherwise the same `-100` floor used for very wide proper priors (improper uniforms have an undefined normalisation anyway).
+3. **DeprecationWarning** from emcee 3.x — `sampler.chain` is deprecated. Two call sites updated:
+   - the in-place PA-wrap (`sampler.chain[:, :, idx] %= 360`) is now applied to the post-extraction `samples` array, removing the deprecated read entirely. Side effect: the `walkers` plot shows un-wrapped PA traces (i.e. visible 0/360 jumps), but the `samples`/`corner` outputs are unchanged.
+   - the walker plot for emcee uses `np.transpose(sampler.get_chain(), (2, 0, 1))` instead of `sampler.chain.T`. zeus and the numpyro `_NumpyroSampler` adapter both keep the existing rollaxis path since their `.chain` attributes are not deprecated.
+
+Verified that the `_optimize_p0` finite-difference fallback `warnings.warn(...)` (a regular `UserWarning`) is now visible to user-side filters — by monkey-patching `jax.grad` to raise and confirming the warning surfaces. Re-ran the original probe (eddy import + emcee fit + numpyro fit): zero warnings emitted. Orphan `import warnings` statements removed from `imagecube.py`, `linecube.py`, `momentmap.py` (rotationmap.py keeps it for `warnings.warn` in `_optimize_p0`).
 
 ### 5.5 Minimal pytest smoke suite
 

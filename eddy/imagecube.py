@@ -10,9 +10,6 @@ from astropy.io import fits
 import scipy.constants as sc
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator, MultipleLocator
-import warnings
-
-warnings.filterwarnings("ignore")
 
 
 def _get_backend():
