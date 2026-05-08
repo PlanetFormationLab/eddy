@@ -75,9 +75,17 @@ def _conical_polar_jnp(xaxis, yaxis, x0, y0, inc, PA, z0):
 
 def _analytic_z(r, z0, psi, r_cavity, r_taper, q_taper):
     """Default analytic emission surface used by ``disk_coords``.
-    ``np.clip(r - r_cavity, 0, None)`` becomes ``jnp.maximum(...)``."""
+    ``np.clip(r - r_cavity, 0, None)`` becomes ``jnp.maximum(...)``.
+
+    The ``r_eff > 0`` double-``where`` shields the autodiff path from
+    ``0 ** psi`` at the cavity boundary: the forward value there is 0, but
+    ``d(r_eff**psi)/dpsi = r_eff**psi * log(r_eff)`` evaluates to ``0 *
+    -inf = NaN`` and would poison NUTS gradients via every parameter."""
     r_eff = jnp.maximum(r - r_cavity, 0.0)
-    return z0 * r_eff ** psi * jnp.exp(-jnp.power(r_eff / r_taper, q_taper))
+    safe = r_eff > 0
+    r_safe = jnp.where(safe, r_eff, 1.0)
+    z_inner = z0 * r_safe ** psi * jnp.exp(-jnp.power(r_safe / r_taper, q_taper))
+    return jnp.where(safe, z_inner, 0.0)
 
 
 @partial(jax.jit, static_argnames=('niter',))

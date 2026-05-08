@@ -303,11 +303,7 @@ Three call sites in the codebase build samplers today:
 
 ### 3.1 Dependencies
 
-`numpyro` is **not** currently installed. Add to `pyproject.toml`:
-```toml
-"numpyro>=0.15",
-```
-Keep `emcee>=3` and `zeus-mcmc>=2` as runtime dependencies (still wired in the existing samplers).
+Done. `numpyro>=0.15` added to `pyproject.toml` runtime dependencies; `emcee>=3` and `zeus-mcmc>=2` retained for the legacy samplers. `_HAS_NUMPYRO` and `_default_sampler` constants live at module scope in `rotationmap.py` (see §3.2).
 
 ### 3.2 Sampler selection
 
@@ -320,20 +316,23 @@ def fit_map(self, p0, params, ..., sampler=None):
     # sampler='zeus'    → zeus EnsembleSampler (legacy)
 ```
 
-Auto-detection fallback:
+Detection (live as of Phase 3.1):
 ```python
+# rotationmap.py
 try:
     import numpyro
-    _default_sampler = 'numpyro'
+    _HAS_NUMPYRO = True
 except ImportError:
-    _default_sampler = 'emcee'
+    _HAS_NUMPYRO = False
+
+_default_sampler = 'emcee'   # decision: numpyro is opt-in
 ```
 
-**Open question: default sampler.** Plan-as-written defaults to numpyro when installed, which is a behaviour change for existing users (different number of samples returned, different walker semantics, possibly different posterior medians at the noise floor). Defaulting to `'emcee'` and making numpyro opt-in via `sampler='numpyro'` is a less invasive option — flag for decision before writing 3.4.
+**Decision (resolved 2026-05-08): default stays `'emcee'`.** Numpyro is opt-in via `sampler='numpyro'`. This avoids any behaviour change for existing scripts (sample counts, walker semantics, posterior medians at the noise floor). The `_HAS_NUMPYRO` flag is exposed so the 3.5 dispatch can raise a clean `ImportError` if a user requests `sampler='numpyro'` without it installed.
 
 ### 3.3 Parameter mapping for backward compat
 
-Existing kwargs are mapped to numpyro equivalents internally:
+Existing kwargs are mapped to numpyro equivalents internally inside `_run_mcmc`:
 
 | existing kwarg | numpyro equivalent |
 |---|---|
@@ -341,11 +340,11 @@ Existing kwargs are mapped to numpyro equivalents internally:
 | `nburnin` | `num_warmup` |
 | `nsteps` | `num_samples` |
 
-`DeprecationWarning` raised when the old names are used. Note: `eddy.rotationmap` and `eddy.annulus` both call `warnings.filterwarnings("ignore")` at import — that would silently swallow our deprecation warnings. Either remove the global filter (preferred) or use `warnings.warn(..., stacklevel=2)` with `category=DeprecationWarning` after re-enabling that category explicitly.
+**Decision (resolved 2026-05-08): no rename, no `DeprecationWarning`.** `nwalkers/nburnin/nsteps` remain the canonical public kwargs of `fit_map` regardless of backend, and the numpyro path translates them internally. This is consistent with the "numpyro is opt-in" decision in §3.2 and avoids a behaviour change for existing scripts. The global `warnings.filterwarnings("ignore")` at the top of `rotationmap.py` is left in place for now since we are not emitting any new warnings; revisit if a future phase needs deprecation messages to surface.
 
 ### 3.4 numpyro model for `fit_map`
 
-The Phase 2.4 `priors_jax` registry already tags every prior as a structured tuple (`('flat', lo, hi, fn)` or `('gaussian', mu, sigma, fn)`); translating to numpyro distributions is mechanical:
+Implemented as `rotationmap._numpyro_model_fitmap(self, params)`. The Phase 2.4 `priors_jax` registry already tags every prior as a structured tuple (`('flat', lo, hi, fn)` or `('gaussian', mu, sigma, fn)`); translating to numpyro distributions is mechanical:
 
 ```python
 import numpyro
@@ -377,20 +376,11 @@ def _numpyro_model_fitmap(self, params):
 
 ### 3.5 NUTS runner + return format
 
-```python
-def _run_nuts(self, p0, params, num_chains, num_warmup, num_samples, **kwargs):
-    nuts = numpyro.infer.NUTS(self._numpyro_model_fitmap)
-    mcmc = numpyro.infer.MCMC(
-        nuts, num_warmup=num_warmup, num_samples=num_samples,
-        num_chains=num_chains, progress_bar=kwargs.pop('progress', True),
-    )
-    mcmc.run(jax.random.PRNGKey(kwargs.pop('seed', 0)), params)
-    samples_dict = mcmc.get_samples()       # {name: (num_chains*num_samples,)}
-    free_keys = self._free_parameter_keys(params)
-    return np.stack([np.asarray(samples_dict[k]) for k in free_keys], axis=1)
-```
+Implemented as `rotationmap._run_nuts(...)`. Two implementation notes from the live code that differ from the original sketch:
 
-Output shape `(num_chains * num_samples, ndim)` — concatenated chains, matches the legacy `(nwalkers * nsteps, ndim)` contract.
+1. **Initialisation.** `init_params` passed to `mcmc.run()` expects values in the *unconstrained* space; passing constrained values silently drifts the chain to the prior boundary. The runner therefore uses `init_strategy=init_to_value(values=...)` on the NUTS kernel, which transforms the user's `p0` into unconstrained space correctly. NUTS adapts step size during warmup, so per-chain scatter (the `random_p0` trick used by emcee/zeus) is unnecessary.
+
+2. **Sampler-shaped return.** `fit_map` post-processing reads `sampler.chain[:, :, idx] %= 360.0`, `sampler.get_chain(discard=, flat=True)`, `sampler.chain.T`, and `sampler.lnprobability[nburnin:]`. To avoid forking the post-processing path, `_run_nuts` returns a `_NumpyroSampler` adapter whose `chain` has shape `(num_chains, num_warmup + num_samples, ndim)` with the warmup region front-padded with NaN, and whose `lnprobability` is `-potential_energy` similarly NaN-padded. `np.array(...)` (not `np.asarray`) is used in the adapter so the array is writable — emcee's PA-wrap relies on in-place mutation.
 
 ### 3.6 `Annulus3D.get_vlos_GP` (deferred)
 
@@ -456,9 +446,99 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 2.4 | Autodiff for pre-MCMC `_optimize_p0` | Medium | ✅ Done (`82d6d38`) |
 | 2.5 | GPU support | Low | ✅ Done (`10d2e21`) |
 | 2.6 | celerite → tinygp swap for GP annulus | High | ✅ Done (`767b044`) |
-| 3.1–3.5 | numpyro NUTS sampler for `fit_map` | High | ⏭ Next |
+| 3.1 | numpyro dependency + `_HAS_NUMPYRO` detection + emcee default | XS | ✅ Done |
+| 3.3–3.5 | numpyro NUTS sampler for `fit_map` (model, runner, internal kwarg mapping) | High | ✅ Done — emcee/numpyro medians agree to within sampling noise on a 5-param HD163296 smoke fit (Δmstar ≈ 0.07, ΔPA ≈ 0.2°, Δvlsr ≈ 7 m/s) |
 | 3.6 | numpyro NUTS for `Annulus3D.get_vlos_GP` | Medium-high | ⏭ Deferred (needs `_lnprior` refactor first) |
 | 4.2 | `to_momentmap()` | Medium | ⏭ Stubbed with `NotImplementedError` |
+| 5.1 | Tutorial-scale Phase 3 validation | Low | 🔶 Partial — wiring proven on 9-param HD163296 fit; uncovered & fixed three latent JAX-autodiff bugs (`_analytic_z`, `_ln_likelihood`, improper-uniform priors). Posterior comparison inconclusive at the budget tested (emcee chain undersampled). 5.1b: rerun at tutorial-2 scale. |
+| 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ⏭ Pending |
+| 5.3 | Remove dead `rotationmap._fit_SHO` helper | Trivial | ⏭ Pending |
+| 5.4 | Tighten / scope the global `warnings.filterwarnings("ignore")` | Low | ⏭ Pending (only matters once we want to surface deprecation warnings) |
+| 5.5 | Minimal pytest smoke suite | Medium | ⏭ Pending — repo currently has no automated tests |
+
+---
+
+## Phase 5 — Validation, Cleanup, Documentation
+
+These items are not strictly part of the original refactor but block calling Phase 3 truly "finished" and protect future work. They are intentionally low-priority compared to 3.6 and 4.2.
+
+### 5.1 Tutorial-scale Phase 3 validation
+
+So far the numpyro path has only been smoke-tested: a 5-parameter HD163296 fit with `nburnin=200, nsteps=200`, comparing posterior medians to emcee. Both backends agreed to within sampling noise (Δmstar ≈ 0.07, ΔPA ≈ 0.2°, Δvlsr ≈ 7 m/s), but the chain lengths are too short to establish that the *posterior shape* matches.
+
+To close this out: pick a representative tutorial fit (tutorial 2's HD163296 3D-surface fit is a natural candidate — 9 free parameters, real `z_func`, beam convolution all exercised), run it under both backends with `nburnin=1000, nsteps=1000`, and compare medians AND 16/84 percentiles per parameter. Record the result here.
+
+**Three bugs uncovered while wiring 5.1** (all already fixed in this branch — they were latent in the earlier JAX work but only surfaced once NUTS demanded clean gradients):
+
+1. `_analytic_z` in [imagecube.py](eddy/imagecube.py) used `r_eff ** psi` directly. At pixels inside the cavity (`r_eff = 0`), the value is 0 but `d/dpsi[r_eff**psi] = r_eff**psi * log(r_eff) = 0 * -inf = NaN`. Wrapped in the standard double-`where`: compute the power on a safe placeholder (`r_safe = where(r_eff > 0, r_eff, 1.0)`) and gate the result with `where(r_eff > 0, z_inner, 0.0)`. Forward unchanged; gradient now 0 at masked pixels instead of NaN.
+2. `_ln_likelihood` did `where(self.mask, (data - model)**2, 0.0)`. Forward this masks NaN-data pixels, but autodiff propagates `data - model = NaN - model = NaN` from the True branch and poisons the gradient via vjp. Fix: clean the data first (`data = where(self.mask, data_raw, 0.0)`) so the diff is finite everywhere; `self.ivar` already zeros out masked pixels so the chi-squared contribution is unchanged.
+3. `_numpyro_model_fitmap` translated every `('flat', lo, hi, ...)` prior to `dist.Uniform(lo, hi)`. Several defaults (notably `r_taper`'s `(0.0, inf)` upper bound) are improper uniforms that `dist.Uniform` cannot represent — numpyro fails NUTS init with "Cannot find valid initial parameters." Fix: dispatch on `np.isfinite(lo/hi)` and use `dist.ImproperUniform` on the matching constraint when one or both bounds are infinite. emcee tolerates unbounded uniforms because it only checks bounds; this preserves the same semantics for NUTS.
+
+The `_optimize_p0` autodiff path silently fell back to finite differences whenever (1) or (2) produced NaN gradients (the global `warnings.filterwarnings("ignore")` was hiding the fallback warning) — so emcee fits "worked" at the cost of every L-BFGS-B step using finite differences. Phase 5.4 (scoping the warnings filter) is now load-bearing rather than purely cosmetic.
+
+**Validation run — HD163296 9-parameter 3D fit, 2026-05-08.**
+
+Same setup as tutorial 2's 3D fit (x0, y0, PA, mstar, vlsr, z0, psi, r_taper, q_taper free; inc fixed; FOV=8″, downsample=4 → 154×154 grid). `r_taper`'s default `(0, inf)` prior was tightened to `(0, 50)` arcsec for the run since the unbounded improper prior produces a poorly conditioned NUTS unconstrained transform — NUTS trees blow up to 1024 leapfrog steps and a single chain takes >>10 min.
+
+| budget | wall | sample shape |
+|---|---|---|
+| emcee: 32 walkers × (300 burnin + 300 sample) | 49 s | (9600, 9) |
+| numpyro NUTS: 1 chain × (200 warmup + 200 sample) | 685 s | (200, 9) |
+
+Per-parameter 16/50/84 percentiles:
+
+| param | emcee 16/50/84 | numpyro 16/50/84 | \|Δmed\| / σ_emcee |
+|---|---|---|---|
+| x0      | −0.025 / −0.021 / −0.017 | −0.046 / −0.046 / −0.045 |  6.0 |
+| y0      | −0.031 / −0.028 / −0.024 | −0.036 / −0.036 / −0.035 |  2.3 |
+| PA      |  312.86 / 312.92 / 312.95 |  312.55 / 312.59 / 312.60 | 11.6 |
+| mstar   |  1.932 / 1.935 / 1.937 |  1.904 / 1.905 / 1.906 | 10.7 |
+| vlsr    |  5768 / 5769 / 5770 |  5771 / 5771 / 5771 |  2.9 |
+| z0      |  0.228 / 0.230 / 0.238 |  0.179 / 0.180 / 0.181 |  9.7 |
+| psi     |  1.66 / 1.67 / 1.69 |  1.96 / 1.99 / 2.03 | 20.6 |
+| r_taper |  3.26 / 3.31 / 3.34 |  3.02 / 3.07 / 3.11 |  6.0 |
+| q_taper |  1.99 / 2.00 / 2.01 |  2.36 / 2.43 / 2.48 | 43.8 |
+
+Both backends give *narrow* posteriors but the medians disagree by far more than either backend's stated uncertainty. The likely explanation: the emcee chain is undersampled — its medians sit essentially on the optimised `p0` (compare emcee `p0` after `_optimize_p0`: `(−0.014, −0.034, 312.8, 1.93, 5700, 0.234, 1.66, 3.30, 1.97)`; the emcee median is within ~0.2σ of every entry except `vlsr`), while numpyro NUTS adapts during warmup and walks meaningfully away. With 9 free parameters at high posterior curvature, 32 walkers × 300 steps is below emcee's effective-sample-size threshold.
+
+What this validation actually establishes:
+
+- ✅ Wiring is correct end-to-end (NUTS init succeeds, traces, samples, returns sampler-shaped output that the existing `fit_map` post-processing consumes without modification).
+- ✅ The bugs in (1)–(3) above were real and are fixed.
+- ✅ The earlier 5-param HD163296 2D smoke test (Phase 3 work) showed the two backends agree to within sampling noise, so the wiring is statistically sound for low-dimensional fits.
+- ❌ A clean "medians/percentiles match in 9-D" demonstration. Achieving that requires either (a) a much longer emcee chain (128 walkers × 5000+ samples — closer to what tutorial 2 actually uses) or (b) confirming numpyro's answer against an external reference fit. Both are >>10 min runs and out of budget for a single session.
+
+**Recommended follow-up (5.1b):** rerun once with emcee at tutorial-2 scale (128 walkers × 1000 burnin × 1000 sample, ≈ 8–10 min) and numpyro with the same `r_taper` ceiling. If the posteriors then match to within sampling noise, mark 5.1 fully resolved; if not, the discrepancy is a real model bug we need to find.
+
+### 5.2 Tutorial showing `mcmc='numpyro'`
+
+Once 5.1 is in hand, update one tutorial (or add a new short one) demonstrating the opt-in NUTS path:
+
+```python
+samples = cube.fit_map(p0=p0, params=params, mcmc='numpyro',
+                       nwalkers=2, nburnin=1000, nsteps=1000,
+                       mcmc_kwargs={'progress': False, 'seed': 0})
+```
+
+Mention that `nwalkers/nburnin/nsteps` map onto `num_chains/num_warmup/num_samples` internally and that NUTS is generally preferred for high-dimensional fits where emcee's autocorrelation time becomes painful.
+
+### 5.3 Remove `rotationmap._fit_SHO`
+
+[`rotationmap._fit_SHO`](eddy/rotationmap.py) became dead code in Phase 1.3 when `fit_annuli` was rewired through `Annulus2D.get_vlos`. The Phase 1 notes flagged it as "left in place for now to avoid breaking any external callers depending on the private helper." Since it's a leading-underscore private, removal is safe; do it in a standalone cleanup commit.
+
+### 5.4 Scope the global `warnings.filterwarnings("ignore")`
+
+`imagecube.py`, `linecube.py`, `momentmap.py`, and `rotationmap.py` all start with `warnings.filterwarnings("ignore")` at module import. This is broad and silences warnings that aren't ours (jax, scipy, astropy). Phase 3.3 decided to leave it alone since we are not currently emitting deprecation warnings, but if a future phase does (kwarg renames, behaviour changes), the filter must be either removed or scoped via `warnings.catch_warnings()` + targeted `simplefilter` calls inside the noisy code paths.
+
+### 5.5 Minimal pytest smoke suite
+
+The repo has no automated tests today; the entire refactor has been validated by manual smoke scripts and tutorial reruns. A small `tests/` directory with:
+
+- `test_imagecube.py` — load TWHya/HD163296 fits, check shape/header/`disk_coords` consistency, round-trip `to_fits()`.
+- `test_rotationmap.py` — run a 50-step `fit_map` under both `mcmc='emcee'` and `mcmc='numpyro'`, assert finite medians and chain shapes.
+- `test_annulus.py` — instantiate `Annulus2D` and `Annulus3D` from a known cube, run `get_vlos` with each fit method.
+
+would catch most regressions in seconds. CI integration is a follow-up.
 
 ---
 

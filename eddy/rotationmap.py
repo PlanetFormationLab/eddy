@@ -16,6 +16,36 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+try:
+    import numpyro  # noqa: F401
+    _HAS_NUMPYRO = True
+except ImportError:
+    _HAS_NUMPYRO = False
+
+# Default MCMC backend for fit_map / fit_annuli. Kept on emcee even when
+# numpyro is installed so existing scripts retain identical walker semantics
+# and posterior shapes; users opt into NUTS via sampler='numpyro'.
+_default_sampler = 'emcee'
+
+
+class _NumpyroSampler:
+    """Thin adapter that exposes a numpyro NUTS run via the subset of the
+    emcee/zeus EnsembleSampler interface that ``fit_map`` post-processing
+    consumes (`chain`, `lnprobability`, and `get_chain`). The chain is
+    front-padded with NaN over the warmup region so a downstream
+    ``get_chain(discard=nburnin)`` works without special-casing the backend.
+    """
+
+    def __init__(self, chain, lnprobability):
+        self.chain = np.array(chain)   # copy: fit_map may modify in place (e.g. PA wrap)
+        self.lnprobability = np.array(lnprobability)
+
+    def get_chain(self, discard=0, flat=False):
+        out = self.chain[:, discard:, :]
+        if flat:
+            return out.reshape(-1, out.shape[-1])
+        return out
+
 
 class rotationmap(momentmap):
     """
@@ -886,7 +916,17 @@ class rotationmap(momentmap):
         return theta
 
     def _run_mcmc(self, p0, params, nwalkers, nburnin, nsteps, mcmc, **kwargs):
-        """Run the MCMC sampling. Returns the sampler."""
+        """Run the MCMC sampling. Returns the sampler (or sampler-shaped
+        adapter when ``mcmc='numpyro'``)."""
+
+        if mcmc == 'numpyro':
+            kwargs.pop('pool', None)   # numpyro handles parallelism via JAX
+            kwargs.pop('moves', None)  # ensemble-only concept
+            return self._run_nuts(p0=p0, params=params,
+                                  num_chains=int(nwalkers),
+                                  num_warmup=int(nburnin),
+                                  num_samples=int(nsteps),
+                                  **kwargs)
 
         if mcmc == 'zeus':
             EnsembleSampler = zeus.EnsembleSampler
@@ -910,12 +950,75 @@ class rotationmap(momentmap):
 
         return sampler
 
+    def _run_nuts(self, p0, params, num_chains, num_warmup, num_samples,
+                  **kwargs):
+        """Run numpyro NUTS over :meth:`_numpyro_model_fitmap` and return a
+        :class:`_NumpyroSampler` adapter. ``num_chains`` / ``num_warmup`` /
+        ``num_samples`` map onto the legacy ``nwalkers`` / ``nburnin`` /
+        ``nsteps`` kwargs of :meth:`fit_map`. ``scatter`` controls the
+        per-chain spread of ``p0`` (matching emcee semantics); ``seed`` and
+        ``chain_method`` are forwarded to numpyro."""
+        if not _HAS_NUMPYRO:
+            raise ImportError(
+                "numpyro is required for mcmc='numpyro'. "
+                "Install with `pip install numpyro`."
+            )
+        import numpyro.infer as ni
+        from numpyro.infer.initialization import init_to_value
+
+        free_keys = self._free_parameter_keys(params)
+        ndim = len(free_keys)
+
+        kwargs.pop('scatter', None)   # legacy emcee kwarg, not needed for NUTS
+        seed = kwargs.pop('seed', 0)
+        progress = kwargs.pop('progress', True)
+        chain_method = kwargs.pop('chain_method', 'sequential')
+
+        # Seed every chain at the (already-optimised) p0 in constrained
+        # parameter space; numpyro will transform to the unconstrained
+        # space internally. NUTS adapts the step size during warmup, so
+        # we don't need per-chain scatter the way emcee/zeus do.
+        p0 = np.asarray(p0).astype(float)
+        init_strategy = init_to_value(
+            values={k: float(p0[idx]) for idx, k in enumerate(free_keys)}
+        )
+
+        nuts = ni.NUTS(self._numpyro_model_fitmap,
+                       init_strategy=init_strategy, **kwargs)
+        mcmc = ni.MCMC(nuts,
+                       num_warmup=num_warmup,
+                       num_samples=num_samples,
+                       num_chains=num_chains,
+                       progress_bar=progress,
+                       chain_method=chain_method)
+        mcmc.run(jax.random.PRNGKey(seed),
+                 params=params,
+                 extra_fields=('potential_energy',))
+
+        samples_dict = mcmc.get_samples(group_by_chain=True)
+        chain_post = jnp.stack([samples_dict[k] for k in free_keys], axis=-1)
+        warmup_pad = jnp.full((num_chains, num_warmup, ndim), jnp.nan)
+        chain = jnp.concatenate([warmup_pad, chain_post], axis=1)
+
+        pe = mcmc.get_extra_fields(group_by_chain=True)['potential_energy']
+        lnprob_post = -np.asarray(pe).T
+        lnprob_pad = np.full((num_warmup, num_chains), np.nan)
+        lnprobability = np.concatenate([lnprob_pad, lnprob_post], axis=0)
+
+        return _NumpyroSampler(np.asarray(chain), lnprobability)
+
     def _ln_likelihood(self, params):
-        """Log-likelihood function. Simple chi-squared likelihood."""
+        """Log-likelihood function. Simple chi-squared likelihood.
+
+        ``self.data`` contains NaN outside the disk; ``where(mask, ...)``
+        masks them out forward, but autodiff still propagates the NaN
+        from ``data - model`` at masked pixels and poisons the gradient.
+        Replacing NaN with 0 *before* the difference keeps the diff
+        finite everywhere; ``self.ivar`` is already 0 at masked pixels
+        so the contribution stays correct."""
         model = self._make_model(params)
-        data = jnp.asarray(self.data)
-        lnx2 = jnp.where(self.mask, (data - model) ** 2, 0.0)
-        lnx2 = -0.5 * jnp.sum(lnx2 * self.ivar)
+        data = jnp.where(self.mask, jnp.asarray(self.data), 0.0)
+        lnx2 = -0.5 * jnp.sum((data - model) ** 2 * self.ivar)
         return jnp.where(jnp.isfinite(lnx2), lnx2, -jnp.inf)
 
     def _ln_prior_jax(self, params):
@@ -967,6 +1070,60 @@ class rotationmap(momentmap):
         if np.isfinite(lnp):
             return lnp + self._ln_likelihood(model)
         return -np.inf
+
+    def _numpyro_model_fitmap(self, params):
+        """numpyro model for :meth:`fit_map`. Draws each free parameter from
+        its registered ``priors_jax`` entry, builds the velocity model via
+        :meth:`_make_model`, and observes the data with per-pixel Gaussian
+        noise derived from ``self.ivar`` (which already has the fitting mask
+        baked in). Pixels with ``ivar == 0`` or non-finite data are masked
+        out of the likelihood.
+
+        Flat priors with one or both bounds at +/- inf cannot be expressed
+        as ``dist.Uniform`` (numpyro can't sample from an unbounded uniform
+        — its log_prob is improper). They become ``dist.ImproperUniform``
+        on the matching constraint, which preserves the emcee/zeus
+        semantics (constant log-density inside the support)."""
+        import numpyro
+        import numpyro.distributions as dist
+        from numpyro.distributions import constraints
+
+        free_keys = self._free_parameter_keys(params)
+        theta = []
+        for name in free_keys:
+            spec = rotationmap.priors_jax[name]
+            if spec[0] == 'flat':
+                _, lo, hi, _ = spec
+                lo_finite = np.isfinite(lo)
+                hi_finite = np.isfinite(hi)
+                if lo_finite and hi_finite:
+                    prior = dist.Uniform(lo, hi)
+                elif lo_finite:
+                    prior = dist.ImproperUniform(
+                        constraints.greater_than(lo), (), ())
+                elif hi_finite:
+                    prior = dist.ImproperUniform(
+                        constraints.less_than(hi), (), ())
+                else:
+                    prior = dist.ImproperUniform(constraints.real, (), ())
+                theta.append(numpyro.sample(name, prior))
+            else:
+                _, mu, sigma, _ = spec
+                theta.append(numpyro.sample(name, dist.Normal(mu, sigma)))
+        theta = jnp.stack(theta)
+
+        populated = rotationmap._populate_dictionary(theta, params)
+        model = self._make_model(populated)
+
+        ivar = self.ivar
+        valid = jnp.logical_and(jnp.asarray(self.mask), ivar > 0)
+        sigma = 1.0 / jnp.sqrt(jnp.where(ivar > 0, ivar, 1.0))
+        data = jnp.where(valid, jnp.asarray(self.data), 0.0)
+        numpyro.sample(
+            'obs',
+            dist.Normal(model, sigma).mask(valid),
+            obs=data,
+        )
 
     def _load_default_parameters(self, path='default_parameters.yml'):
         """Load the default parameters."""

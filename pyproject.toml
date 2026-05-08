@@ -26,6 +26,7 @@ dependencies = [
     "emcee>=3",
     "corner>=2",
     "zeus-mcmc>=2",
+    "numpyro>=0.15",
     "bettermoments>=1",
 ]
 
