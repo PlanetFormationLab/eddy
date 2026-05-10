@@ -1238,9 +1238,11 @@ class rotationmap(momentmap):
                     models += [_model]
                 else:
                     models += [self._make_model(tmp)]
-            rvals = collapse_func(rvals, axis=0)
             models = collapse_func(models, axis=0)
-            return (rvals, models) if profile_only else models
+            if profile_only:
+                rvals = collapse_func(rvals, axis=0)
+                return rvals, models
+            return models
 
         # Take a percentile of the samples.
 
