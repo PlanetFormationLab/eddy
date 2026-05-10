@@ -30,23 +30,129 @@ class linecube(imagecube):
 
     # -- 3D CUBE I/O & DIAGNOSTICS -- #
 
+    # Velocity-unit moment maps -- collapse methods whose first product
+    # is a line-centroid velocity in the same units as ``self.velax``.
+    # For these, ``to_momentmap`` returns a :class:`rotationmap` so the
+    # output composes directly with ``fit_map`` etc. All other methods
+    # produce intensity-unit maps and return a :class:`momentmap`.
+    _BM_VELOCITY_METHODS = frozenset({
+        'first', 'quadratic', 'gaussian', 'gausshermite',
+        'gaussthick', 'doublegauss',
+    })
+
     def to_momentmap(self, method='zeroth', clip=None,
                      bettermoments_kwargs=None):
-        """Collapse the spectral cube to a 2D moment map.
+        """Collapse the spectral cube to a 2D moment map via
+        ``bettermoments``.
 
-        Returns a :class:`momentmap` instance (or :class:`rotationmap` for
-        ``method`` in ``{'first', 'quadratic'}``). When ``bettermoments`` is
-        installed and ``method`` matches one of its method names, this
-        method delegates to it.
+        Args:
+            method (str): Name of the bettermoments collapse method,
+                without the ``collapse_`` prefix (e.g. ``'zeroth'``,
+                ``'first'``, ``'quadratic'``, ``'maximum'``,
+                ``'gaussian'``). See :mod:`bettermoments` for the full
+                list and what each one returns.
+            clip (Optional[float]): If set, replace pixels with
+                ``|data| < clip * rms`` by zero before collapsing —
+                matches ``bettermoments``'s sigma-clipping convention.
+                Set to ``None`` (the default) to skip clipping.
+            bettermoments_kwargs (Optional[dict]): Extra kwargs forwarded
+                to the ``bettermoments`` collapse function. Most simple
+                methods (``zeroth``, ``first``, ``quadratic``,
+                ``maximum``, ...) accept no extra kwargs; the
+                fitting-based methods (``gaussian``, ``gausshermite``,
+                ...) accept ``indices`` and ``ncpu``.
 
-        .. note::
-            Stubbed for Phase 4.2; calling this currently raises
-            ``NotImplementedError``.
+        Returns:
+            A :class:`rotationmap` instance for velocity-typed methods
+            (``first``, ``quadratic``, ``gaussian``, ``gausshermite``,
+            ``gaussthick``, ``doublegauss``) and a :class:`momentmap`
+            instance otherwise. The first uncertainty product (if the
+            method returns one, e.g. ``dM0``, ``dM1``, ``dv0``) is
+            attached as ``self.error`` on the returned object.
         """
-        raise NotImplementedError(
-            "linecube.to_momentmap() is scheduled for Phase 4.2 of the "
-            "refactor. Use bettermoments directly for now."
-        )
+        try:
+            import bettermoments as bm
+        except ImportError as exc:
+            raise ImportError(
+                "linecube.to_momentmap() requires the bettermoments "
+                "package. Install with `pip install bettermoments`."
+            ) from exc
+
+        method_key = method.lower()
+        collapse = getattr(bm, 'collapse_{}'.format(method_key), None)
+        if collapse is None or not callable(collapse):
+            raise ValueError(
+                "Unknown bettermoments method '{}'. See "
+                "bettermoments.methods for valid names "
+                "(e.g. 'zeroth', 'first', 'quadratic', 'maximum')."
+                .format(method)
+            )
+
+        rms = float(self.estimate_cube_RMS())
+        data = np.asarray(self.data)
+        if clip is not None:
+            data = np.where(np.abs(data) > float(clip) * rms, data, 0.0)
+
+        bm_kwargs = ({} if bettermoments_kwargs is None
+                     else dict(bettermoments_kwargs))
+        products = collapse(velax=np.asarray(self.velax),
+                            data=data, rms=rms, **bm_kwargs)
+        # Normalise the return to a tuple of 2D arrays. Most collapse
+        # functions return a tuple; ``collapse_quadratic`` (and a couple
+        # of others) instead return a single stacked 3D ndarray whose
+        # leading axis enumerates the products. Either way, the first
+        # entry is the moment map and the second (if any) is its
+        # uncertainty.
+        if isinstance(products, np.ndarray):
+            if products.ndim == 3:
+                products = tuple(products[i] for i in range(products.shape[0]))
+            else:
+                products = (products,)
+        moment = np.asarray(products[0])
+
+        if method_key in self._BM_VELOCITY_METHODS:
+            from .rotationmap import rotationmap
+            out_cls = rotationmap
+            unit_override = 'm/s'      # self.velax is m/s, so v0 is too
+        else:
+            from .momentmap import momentmap
+            out_cls = momentmap
+            unit_override = None
+
+        # Round-trip through a temp FITS so the returned instance picks
+        # up a consistent header rebuilt from the live xaxis/yaxis. This
+        # avoids reimplementing all the per-attribute init logic
+        # (beam parsing, axis flips, restfreq, ...) for an in-memory
+        # construction path.
+        import contextlib
+        import io
+        import os
+        import tempfile
+        from astropy.io import fits
+
+        header = self._consistent_header(moment)
+        if unit_override is not None:
+            header['BUNIT'] = unit_override
+
+        with tempfile.NamedTemporaryFile(suffix='.fits',
+                                         delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            fits.writeto(tmp_path, data=moment,
+                         header=header, overwrite=True)
+            # Suppress rotationmap.__init__'s "Assuming uncertainties
+            # in /tmp/...fits" prints — the temp path has no sibling
+            # uncertainty file, and we attach the proper dv0 below.
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = out_cls(path=tmp_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        if len(products) >= 2 and products[1] is not None:
+            out.error = np.asarray(products[1])
+
+        return out
 
     @property
     def rms(self):

@@ -460,19 +460,19 @@ def to_fits(self, path, data=None, overwrite=False):
 
 Useful for saving model velocity maps from `rotationmap.evaluate_models()`.
 
-### 4.2 `to_momentmap()` on `linecube`
+### 4.2 `to_momentmap()` on `linecube` — done 2026-05-10
 
-```python
-def to_momentmap(self, method='zeroth', clip=None, bettermoments_kwargs=None):
-    """
-    Collapse the spectral cube to a 2D moment map.
-    
-    Returns a momentmap instance. If bettermoments is installed and
-    method is a bettermoments method name, delegates to bettermoments.
-    """
-```
+Delegates to `bettermoments`'s `collapse_<method>` functions. Returns a [`rotationmap`](eddy/rotationmap.py) for velocity-typed methods (`first`, `quadratic`, `gaussian`, `gausshermite`, `gaussthick`, `doublegauss` — anything where the first product is a line-centroid velocity in m/s) and a [`momentmap`](eddy/momentmap.py) for intensity-typed methods (`zeroth`, `eighth`, `ninth`, `maximum`, `width`, `percentiles`, ...). The first uncertainty product (`dM0`, `dv0`, etc.) is attached as `out.error` on the returned object.
 
-Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method='quadratic'`).
+Implementation notes:
+
+- **Return-shape normalisation.** Most `collapse_*` functions return tuples of 2D arrays, but `collapse_quadratic` (and a couple of others) return a single stacked 3D ndarray with the products on the leading axis. The implementation normalises both to a tuple-of-2D before reading `[0]` (the moment map) and `[1]` (the uncertainty).
+- **Construction via temp FITS.** `momentmap` and `rotationmap` are path-based classes (their `__init__`s go through `_read_FITS`). Rather than reimplementing all the per-attribute init logic — beam parsing, axis flips, `restfreq`, `_readuncertainty` — for an in-memory construction path, the moment array is written to a `tempfile.NamedTemporaryFile` with a header rebuilt by [`imagecube._consistent_header`](eddy/imagecube.py), the output class is loaded from that path, and the temp file is unlinked. The rotationmap's "Assuming uncertainties in /tmp/..." print is suppressed via `contextlib.redirect_stdout` since the temp path has no sibling uncertainty file and we attach the proper `dv0` array immediately afterwards.
+- **`clip` semantics.** Mirrors bettermoments' sigma-clipping: `clip=N` replaces pixels with `|data| < N * rms` by zero before collapsing. Implemented at the call site rather than per-method to keep the behaviour uniform.
+- **`numpy>=2.0` compatibility.** `bettermoments<1.9.6` calls the removed `np.trapz`. Bumped the runtime dep to `bettermoments>=1.9.6` (uses `np.trapezoid`).
+- **Method dispatch.** `getattr(bm, 'collapse_{}'.format(method.lower()), None)` with a callable-check catches both unknown method names and accidental hits on non-callable members like `collapse_cube` (the *module*, not a function). Surfaces a clean `ValueError` either way.
+
+Five smoke tests in [`tests/test_imagecube.py`](tests/test_imagecube.py) cover the `zeroth`/`first`/`quadratic` paths (the latter exercises the stacked-ndarray unpack), the `clip` argument (large `clip` zeroes the output), and the unknown-method error path. All run in under 1 s each because bettermoments' simple collapses are pure numpy.
 
 ---
 
@@ -492,7 +492,7 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 3.1 | numpyro dependency + `_HAS_NUMPYRO` detection + emcee default | XS | ✅ Done |
 | 3.3–3.5 | numpyro NUTS sampler for `fit_map` (model, runner, internal kwarg mapping) | High | ✅ Done — emcee/numpyro medians agree to within sampling noise on a 5-param HD163296 smoke fit (Δmstar ≈ 0.07, ΔPA ≈ 0.2°, Δvlsr ≈ 7 m/s) |
 | 3.6 | numpyro NUTS for `Annulus3D.get_vlos_GP` | Medium-high | ✅ Done — bypasses `_resample_spectra` (un-traceable scipy `binned_statistic`), feeds the unbinned shifted spectra to a dense Matern-3/2 GP. Bespoke `_lnprior` translated to structured priors with one mild relaxation (`vrad ~ Uniform(-1.4·vref, 1.4·vref)` instead of `|vrad/vrot| < 1`). Validated against emcee on TWHya (TWHya tutorial annulus, beam-spaced): all four parameters agree to within ≤0.9σ at matched budget. |
-| 4.2 | `to_momentmap()` | Medium | ⏭ Stubbed with `NotImplementedError` |
+| 4.2 | `to_momentmap()` | Medium | ✅ Done — delegates to `bettermoments` collapse functions; returns a `rotationmap` for velocity-typed methods (`first`/`quadratic`/`gaussian`/...) and a `momentmap` otherwise. `bettermoments>=1.9.6` (numpy 2.0 compatible). |
 | 5.1 | Tutorial-scale Phase 3 validation | Low | ✅ Done — emcee/numpyro medians agree to within 0.2σ on all 9 params (HD163296 3D fit, 128 walkers × 1000+1000 vs. 1 chain × 500+500). Surfaced & fixed three latent JAX-autodiff bugs along the way. |
 | 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ✅ Done — `docs/tutorials/tutorial_6_numpyro.ipynb` mirroring tutorial 2's HD163296 setup; wired into `docs/index.rst` |
 | 5.3 | Remove dead `_SHO_*` helpers (`_fit_SHO`, `_SHO_chi2`, `_SHO_MCMC`, `_SHO_ln_*`) | Trivial | ✅ Done — ~140 lines deleted; `set_SHO_prior` / `SHO_priors` retained for backward compat |

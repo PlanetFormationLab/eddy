@@ -108,3 +108,72 @@ def test_to_fits_header_consistency_after_clip(hd163296_v0_path, tmp_path):
 def test_momentmap_rejects_3d(twhya_cube_path):
     with pytest.raises(ValueError, match="momentmap expects 2D data"):
         momentmap(twhya_cube_path)
+
+
+# ---------------------------------------------------------------------------
+# linecube.to_momentmap (Phase 4.2). Each method is a dispatch + numerics
+# smoke test; the actual moment-map maths is bettermoments' job.
+# ---------------------------------------------------------------------------
+
+
+def test_to_momentmap_zeroth_returns_momentmap(twhya_cube_path):
+    pytest.importorskip("bettermoments")
+    from eddy import rotationmap
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out = cube.to_momentmap(method='zeroth')
+    assert isinstance(out, momentmap)
+    assert not isinstance(out, rotationmap)
+    assert out.data.shape == (cube.yaxis.size, cube.xaxis.size)
+    assert np.all(np.isfinite(np.asarray(out.data)))
+    # bettermoments' collapse_zeroth returns (M0, dM0); we attach dM0.
+    assert hasattr(out, 'error') and out.error is not None
+    assert out.error.shape == out.data.shape
+
+
+def test_to_momentmap_first_returns_rotationmap(twhya_cube_path):
+    """method='first' returns a rotationmap because the output is a
+    velocity centroid in the same units as ``self.velax`` (m/s)."""
+    pytest.importorskip("bettermoments")
+    from eddy import rotationmap
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out = cube.to_momentmap(method='first')
+    assert isinstance(out, rotationmap)
+    assert out.data.shape == (cube.yaxis.size, cube.xaxis.size)
+    assert out.header['BUNIT'].lower() == 'm/s'
+    # Output values should sit inside the cube's velocity range.
+    finite = np.asarray(out.data)[np.isfinite(np.asarray(out.data))]
+    assert finite.min() >= cube.velax.min() - abs(cube.chan)
+    assert finite.max() <= cube.velax.max() + abs(cube.chan)
+
+
+def test_to_momentmap_quadratic_unpacks_stacked_return(twhya_cube_path):
+    """``collapse_quadratic`` returns a stacked 3D ndarray (4, ny, nx)
+    rather than a tuple. This test exercises the unpack path."""
+    pytest.importorskip("bettermoments")
+    from eddy import rotationmap
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out = cube.to_momentmap(method='quadratic')
+    assert isinstance(out, rotationmap)
+    assert out.data.shape == (cube.yaxis.size, cube.xaxis.size)
+    # dv0 attached as error.
+    assert hasattr(out, 'error') and out.error is not None
+    assert out.error.shape == out.data.shape
+
+
+def test_to_momentmap_clip_zeroes_low_signal(twhya_cube_path):
+    """clip=N replaces |data| < N*rms with 0 before collapsing. Check
+    that a very large clip (N=1e6) zeroes out everything — the moment
+    map should be identically zero except where bettermoments' RMS
+    estimate is itself 0 (which would zero the threshold)."""
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out = cube.to_momentmap(method='zeroth', clip=1e6)
+    arr = np.asarray(out.data)
+    assert np.all(arr == 0.0)
+
+
+def test_to_momentmap_unknown_method_raises(twhya_cube_path):
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    with pytest.raises(ValueError, match="Unknown bettermoments method"):
+        cube.to_momentmap(method='not_a_real_method')

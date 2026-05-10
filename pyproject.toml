@@ -27,7 +27,7 @@ dependencies = [
     "corner>=2",
     "zeus-mcmc>=2",
     "numpyro>=0.15",
-    "bettermoments>=1",
+    "bettermoments>=1.9.6",
 ]
 
 [project.optional-dependencies]
