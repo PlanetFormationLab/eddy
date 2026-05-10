@@ -454,7 +454,7 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ✅ Done — `docs/tutorials/tutorial_6_numpyro.ipynb` mirroring tutorial 2's HD163296 setup; wired into `docs/index.rst` |
 | 5.3 | Remove dead `_SHO_*` helpers (`_fit_SHO`, `_SHO_chi2`, `_SHO_MCMC`, `_SHO_ln_*`) | Trivial | ✅ Done — ~140 lines deleted; `set_SHO_prior` / `SHO_priors` retained for backward compat |
 | 5.4 | Tighten / scope the global `warnings.filterwarnings("ignore")` | Low | ✅ Done — the global filter was hiding only three real bugs; all fixed at the source. No filter needed; orphan `import warnings` lines removed. |
-| 5.5 | Minimal pytest smoke suite | Medium | ⏭ Pending — repo currently has no automated tests |
+| 5.5 | Minimal pytest smoke suite | Medium | ✅ Done — 17 fast tests across `imagecube` / `rotationmap` / `Annulus2D` / `Annulus3D` (~25 s); 1 `slow`-marked GP test; surfaced two latent `OptimizeWarning` bugs (Nelder-Mead `maxfun`/`ftol` and Powell `maxfun`) and fixed at source |
 
 ---
 
@@ -570,15 +570,28 @@ Investigation: removed the four `warnings.filterwarnings("ignore")` calls (one p
 
 Verified that the `_optimize_p0` finite-difference fallback `warnings.warn(...)` (a regular `UserWarning`) is now visible to user-side filters — by monkey-patching `jax.grad` to raise and confirming the warning surfaces. Re-ran the original probe (eddy import + emcee fit + numpyro fit): zero warnings emitted. Orphan `import warnings` statements removed from `imagecube.py`, `linecube.py`, `momentmap.py` (rotationmap.py keeps it for `warnings.warn` in `_optimize_p0`).
 
-### 5.5 Minimal pytest smoke suite
+### 5.5 Minimal pytest smoke suite — done 2026-05-10
 
-The repo has no automated tests today; the entire refactor has been validated by manual smoke scripts and tutorial reruns. A small `tests/` directory with:
+Added a `tests/` directory backed by the tutorial FITS files (no extra fixture data shipped). 17 fast tests run in ~25 s; one `slow`-marked GP test is opt-in via `pytest -m slow`.
 
-- `test_imagecube.py` — load TWHya/HD163296 fits, check shape/header/`disk_coords` consistency, round-trip `to_fits()`.
-- `test_rotationmap.py` — run a 50-step `fit_map` under both `mcmc='emcee'` and `mcmc='numpyro'`, assert finite medians and chain shapes.
-- `test_annulus.py` — instantiate `Annulus2D` and `Annulus3D` from a known cube, run `get_vlos` with each fit method.
+Files:
+- [`tests/conftest.py`](tests/conftest.py) — session-scoped fixtures resolve the `docs/tutorials/*.fits` paths and lazily build a downsampled HD163296 `rotationmap` and a TWHya `linecube`.
+- [`tests/test_imagecube.py`](tests/test_imagecube.py) — 2D/3D load checks, axis/shape consistency, `disk_coords` midplane + flared sanity, `to_fits()` round-trip (2D and 3D), header rebuild after FOV clip, `momentmap` rejecting 3D input.
+- [`tests/test_rotationmap.py`](tests/test_rotationmap.py) — 5-parameter `fit_map` smoke under `mcmc='emcee'` and `mcmc='numpyro'`; checks chain shape and that `_optimize_p0` doesn't NaN-out the autodiff path. Also covers `returns=['percentiles']`.
+- [`tests/test_annulus.py`](tests/test_annulus.py) — `Annulus2D` SHO fit and rejection of non-SHO methods; `Annulus3D` SHO/dV/SNR fits; GP fit gated behind `@pytest.mark.slow` (~10–30 s due to JAX compile + emcee).
 
-would catch most regressions in seconds. CI integration is a follow-up.
+Plumbing changes:
+- `pyproject.toml`: added `[tool.pytest.ini_options]` with `testpaths = ["tests"]` and the `slow` marker; added `[project.optional-dependencies] test = ["pytest>=7"]`; bumped `numpy>=1.20 → numpy>=2.0`.
+- `np.trapz → np.trapezoid` in [`annulus.py`](eddy/annulus.py) and [`helper_functions.py`](eddy/helper_functions.py) — `np.trapz` was removed in NumPy 2.0.
+
+**Bonus bugs fixed at source** (two `OptimizeWarning`s the test run surfaced — exactly the kind of latent issue Phase 5.4 anticipated):
+- [`annulus.py:961-965`](eddy/annulus.py#L961-L965) — `Annulus3D.get_vlos_dV` defaults Nelder-Mead options to `maxfun` / `ftol`, but Nelder-Mead's options are `maxfev` / `fatol`. Renamed.
+- [`annulus.py:1143-1147`](eddy/annulus.py#L1143-L1147) — `Annulus3D.get_vlos_SNR` defaults Powell's options to `maxfun`; Powell's option is `maxfev`. Renamed (`ftol` is valid for Powell, left alone).
+- The two L-BFGS-B sites that legitimately pass `maxfun`/`ftol` ([`annulus.py:665-669`](eddy/annulus.py#L665-L669) and [`rotationmap.py:746-749`](eddy/rotationmap.py#L746-L749)) are correct and unchanged.
+
+Re-running the full fast suite with `-W error::scipy.optimize.OptimizeWarning -W error::UserWarning` passes 17/17.
+
+CI integration left as a follow-up.
 
 ---
 

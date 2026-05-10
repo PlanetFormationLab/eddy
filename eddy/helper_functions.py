@@ -347,7 +347,7 @@ def get_p0_gaussian(x, y):
         raise ValueError("Mismatch in array shapes.")
     Tb = np.max(y)
     x0 = x[y.argmax()]
-    dV = np.trapz(y, x) / Tb / np.sqrt(2. * np.pi)
+    dV = np.trapezoid(y, x) / Tb / np.sqrt(2. * np.pi)
     return x0, dV, Tb
 
 

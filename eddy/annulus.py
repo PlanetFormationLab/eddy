@@ -961,8 +961,8 @@ class annulus(Annulus):
         optimize_kwargs['method'] = optimize_kwargs.get('method', 'Nelder-Mead')
         options = optimize_kwargs.pop('options', {})
         options['maxiter'] = options.pop('maxiter', 10000)
-        options['maxfun'] = options.pop('maxfun', 10000)
-        options['ftol'] = options.pop('ftol', 1e-4)
+        options['maxfev'] = options.pop('maxfev', 10000)
+        options['fatol'] = options.pop('fatol', 1e-4)
         optimize_kwargs['options'] = options
 
         # Run the minimization.
@@ -1143,7 +1143,7 @@ class annulus(Annulus):
         optimize_kwargs['method'] = optimize_kwargs.get('method', 'Powell')
         options = optimize_kwargs.pop('options', {})
         options['maxiter'] = options.pop('maxiter', 10000)
-        options['maxfun'] = options.pop('maxfun', 10000)
+        options['maxfev'] = options.pop('maxfev', 10000)
         options['ftol'] = options.pop('ftol', 1e-4)
         optimize_kwargs['options'] = options
 
@@ -1205,7 +1205,7 @@ class annulus(Annulus):
             else:
                 w = np.ones(x.size)
             mask = abs(x - x0) / dx <= 3.0
-            SNR = np.trapz((y * w)[mask], x=x[mask])
+            SNR = np.trapezoid((y * w)[mask], x=x[mask])
         return -SNR
 
     def _estimate_RMS(self, N=15, iterative=False, nsigma=3.0):

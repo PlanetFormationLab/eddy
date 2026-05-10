@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "scipy>=1.7",
-    "numpy>=1.20",
+    "numpy>=2.0",
     "jax>=0.4",
     "jaxlib>=0.4",
     "tinygp>=0.3",
@@ -30,8 +30,19 @@ dependencies = [
     "bettermoments>=1",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7",
+]
+
 [project.urls]
 Homepage = "https://github.com/PlanetFormationLab/eddy"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests that take more than a few seconds (deselect with '-m \"not slow\"')",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
