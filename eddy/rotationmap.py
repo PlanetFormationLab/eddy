@@ -789,9 +789,17 @@ class rotationmap(momentmap):
         moves = kwargs.pop('moves', None)
         pool = kwargs.pop('pool', None)
 
+        # Build a JIT'd log-likelihood closure once before the chain
+        # runs. The hot loop (nwalkers * (nburnin + nsteps) calls) then
+        # hits a compiled function instead of paying per-jnp-op Python
+        # dispatch cost on every model evaluation. The prior is kept on
+        # the numpy/Python side so out-of-bounds proposals short-circuit
+        # without entering the trace.
+        ln_prob_fn = self._build_fast_ln_probability(params)
+
         sampler = EnsembleSampler(nwalkers,
                                   p0.shape[1],
-                                  self._ln_probability,
+                                  ln_prob_fn,
                                   args=[params, np.nan],
                                   moves=moves,
                                   pool=pool)
@@ -801,6 +809,42 @@ class rotationmap(momentmap):
         sampler.run_mcmc(p0, nburnin + nsteps, progress=progress, **kwargs)
 
         return sampler
+
+    def _build_fast_ln_probability(self, params):
+        """Return a ``(theta, *unused) -> float`` callable for emcee/zeus
+        that JIT-compiles the chi-squared model+likelihood once and reuses
+        the compiled function across all walker proposals.
+
+        The free-parameter values vary per call; everything else in
+        ``params`` (vfunc, boolean flags like ``beam`` / ``vortex``,
+        fixed scalars like ``inc`` / ``dist``, the deprojection callables,
+        and ``self.data`` / ``self.mask`` / ``self.ivar``) is captured at
+        trace time and baked into the compiled function as constants. As
+        long as the dict's structural keys don't change across calls
+        (they don't, inside a single ``_run_mcmc``), JAX hits the cached
+        trace on every iteration."""
+
+        free_keys = rotationmap._free_parameter_keys(params)
+        static_params = {k: v for k, v in params.items()
+                         if k not in free_keys}
+
+        @jax.jit
+        def jit_lnL(theta):
+            full = dict(static_params)
+            for i, k in enumerate(free_keys):
+                full[k] = theta[i]
+            return self._ln_likelihood(full)
+
+        def fast_ln_probability(theta, *params_in):
+            # Prior on the numpy/Python side: cheap, and lets us
+            # short-circuit -inf without entering the trace.
+            populated = rotationmap._populate_dictionary(theta, params_in[0])
+            lnp = self._ln_prior(populated)
+            if not np.isfinite(lnp):
+                return -np.inf
+            return float(lnp) + float(jit_lnL(jnp.asarray(theta)))
+
+        return fast_ln_probability
 
     def _run_nuts(self, p0, params, num_chains, num_warmup, num_samples,
                   **kwargs):
@@ -1650,11 +1694,16 @@ class rotationmap(momentmap):
     def _make_model(self, params):
         """Build the velocity model from the dictionary of parameters."""
 
-        # Calculate the deprojected pixel values including ellipticity
+        # Calculate the deprojected pixel values including ellipticity.
+        # Read via ``.get`` not ``.pop`` so the input dict is not mutated;
+        # mutation breaks repeated JIT calls that re-use the captured
+        # dict (the second call would see missing keys). ``disk_coords``
+        # absorbs unknown kwargs via ``**_``, so leaving the extras in
+        # place is harmless.
 
-        ac = params.pop('ac', None)
-        ec = params.pop('ec', None)
-        om = params.pop('pericenter_phase', 0.0)
+        ac = params.get('ac', None)
+        ec = params.get('ec', None)
+        om = params.get('pericenter_phase', 0.0)
 
         rvals, tvals, zvals = self.disk_coords(**params)
         if ec is not None and ac is not None:
