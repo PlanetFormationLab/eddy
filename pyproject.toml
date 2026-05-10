@@ -4,17 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astro-eddy"
-version = "2.4.1"
+version = "3.0.0"
 authors = [
     { name = "Richard Teague", email = "rteague@mit.edu" }
 ]
 description = "Tools to study the dynamics of protoplanetary disks."
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
     "scipy>=1.7",
@@ -37,6 +45,9 @@ test = [
 
 [project.urls]
 Homepage = "https://github.com/PlanetFormationLab/eddy"
+Documentation = "https://eddy.readthedocs.io"
+Repository = "https://github.com/PlanetFormationLab/eddy"
+Issues = "https://github.com/PlanetFormationLab/eddy/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

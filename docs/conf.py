@@ -18,11 +18,11 @@ sys.path.insert(0, os.path.abspath('.'))
 # -- Project information -----------------------------------------------------
 
 project = 'eddy'
-copyright = '2020, 2021, Richard Teague'
+copyright = '2020-2026, Richard Teague'
 author = 'Richard Teague'
 
 # The full version, including alpha/beta/rc tags
-release = '1.2.1'
+release = '3.0.0'
 
 # -- General configuration ---------------------------------------------------
 
