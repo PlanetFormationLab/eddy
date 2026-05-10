@@ -6,6 +6,27 @@ import numpy as np
 
 # -- MCMC / OPTIMIZATION FUNCTIONS -- #
 
+
+class _NumpyroSampler:
+    """Thin adapter that exposes a numpyro NUTS run via the subset of the
+    emcee/zeus EnsembleSampler interface that downstream post-processing
+    consumes (`chain`, `lnprobability`, and `get_chain`). The chain is
+    front-padded with NaN over the warmup region so a downstream
+    ``get_chain(discard=nburnin)`` works without special-casing the
+    backend. Used by both :class:`rotationmap` (``fit_map``) and
+    :class:`Annulus3D` (``get_vlos_GP``)."""
+
+    def __init__(self, chain, lnprobability):
+        self.chain = np.array(chain)   # copy: callers may modify in place (e.g. PA wrap)
+        self.lnprobability = np.array(lnprobability)
+
+    def get_chain(self, discard=0, flat=False):
+        out = self.chain[:, discard:, :]
+        if flat:
+            return out.reshape(-1, out.shape[-1])
+        return out
+
+
 def random_p0(p0, scatter, nwalkers):
     """
     Introduce scatter to starting positions while allowing for starting

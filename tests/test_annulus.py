@@ -59,18 +59,20 @@ def test_annulus2d_rejects_non_sho(hd163296_rotationmap):
 # ---------------------------------------------------------------------------
 
 
-def _twhya_annulus(cube):
+def _twhya_annulus(cube, beam_spacing=True):
     """Tutorial-3 setup: thin annulus around r=1.0".
 
     inc is positive (small disk) and PA matches the published value;
     these are needed so the sin(i) deprojection in get_vlos doesn't
-    blow up. ``beam_spacing=False`` to keep enough spectra per annulus
-    for the fit methods to converge at low budget.
-    """
+    blow up. The default ``beam_spacing=True`` downsamples to roughly
+    one spectrum per beam (~40 spectra here), keeping the GP kernel
+    matrix under ~2k×2k for the GP test. The dV/SNR/SHO methods
+    operate on stacked spectra and are unaffected by the spacing
+    choice."""
     return cube.get_annulus(
         r_min=1.0, r_max=1.0 + cube.bmaj,
         inc=6.5, PA=151.0,
-        beam_spacing=False,
+        beam_spacing=beam_spacing,
     )
 
 
@@ -113,6 +115,27 @@ def test_annulus3d_get_vlos_gp(twhya_linecube):
         fit_method='GP',
         nwalkers=8, nburnin=20, nsteps=20,
         mcmc_kwargs={'progress': False},
+    )
+    assert popt.shape == (3,)
+    assert np.isfinite(popt[0])
+
+
+@pytest.mark.slow
+def test_annulus3d_get_vlos_gp_numpyro(twhya_linecube):
+    """numpyro NUTS variant of the GP path. Bypasses _resample_spectra
+    (numpy-only, data-dependent shape) and feeds the unbinned shifted
+    spectra to a dense Matern-3/2 GP. Wall time dominated by JAX
+    compilation; one warm run plus 30 NUTS samples is enough to
+    exercise the full _numpyro_model_GP / _run_nuts_GP / _NumpyroSampler
+    path and the get_vlos_GP dispatch."""
+    pytest.importorskip("numpyro")
+    ann = _twhya_annulus(twhya_linecube)
+    popt, cvar = ann.get_vlos(
+        fit_method='GP',
+        nwalkers=1, nburnin=20, nsteps=20,
+        mcmc='numpyro',
+        mcmc_kwargs={'progress': False, 'seed': 0,
+                     'max_tree_depth': 6},
     )
     assert popt.shape == (3,)
     assert np.isfinite(popt[0])

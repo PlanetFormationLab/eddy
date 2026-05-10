@@ -6,13 +6,21 @@ import emcee
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
-from .helper_functions import plot_walkers, plot_corner, random_p0
+from .helper_functions import (plot_walkers, plot_corner, random_p0,
+                               _NumpyroSampler)
 from scipy.stats import binned_statistic
 from scipy.optimize import curve_fit
 from scipy.optimize import minimize
 
+import jax
 import jax.numpy as jnp
 from tinygp import GaussianProcess, kernels
+
+try:
+    import numpyro  # noqa: F401
+    _HAS_NUMPYRO = True
+except ImportError:
+    _HAS_NUMPYRO = False
 
 __all__ = ['annulus', 'Annulus', 'Annulus2D', 'Annulus3D']
 
@@ -560,38 +568,70 @@ class annulus(Annulus):
         nburnin = np.atleast_1d(nburnin)
         nwalkers = np.atleast_1d(nwalkers)
         mcmc_kwargs = {} if mcmc_kwargs is None else mcmc_kwargs
-        progress = mcmc_kwargs.pop('progress', True)
-        moves = mcmc_kwargs.pop('moves', None)
-        pool = mcmc_kwargs.pop('pool', None)
+
+        if mcmc == 'numpyro':
+            # The unbinned NUTS likelihood path bypasses
+            # _resample_spectra and the velax_mask window — neither is
+            # JAX-traceable. Surface clear errors rather than silently
+            # ignoring user kwargs.
+            if resample is not False and resample != 0:
+                raise ValueError(
+                    "mcmc='numpyro' requires resample=False (the "
+                    "unbinned shifted spectra are fed directly to a "
+                    "dense Matern-3/2 GP). Use mcmc='emcee' for "
+                    "binned-spectrum fits.")
+            if not np.allclose(self.velax_mask,
+                               [self.velax[0], self.velax[-1]]):
+                raise ValueError(
+                    "mcmc='numpyro' does not support a non-default "
+                    "velax_mask. Reset self.velax_mask or use "
+                    "mcmc='emcee'.")
+        else:
+            progress = mcmc_kwargs.pop('progress', True)
+            moves = mcmc_kwargs.pop('moves', None)
+            pool = mcmc_kwargs.pop('pool', None)
 
         for n in range(int(niter)):
 
+            ns = int(nsteps[n % nsteps.size])
+            nb = int(nburnin[n % nburnin.size])
+            nw = int(nwalkers[n % nwalkers.size])
+
+            if mcmc == 'numpyro':
+                sampler = self._run_nuts_GP(p0=p0,
+                                            fit_vrad=fit_vrad,
+                                            num_chains=nw,
+                                            num_warmup=nb,
+                                            num_samples=ns,
+                                            **mcmc_kwargs)
+            else:
+                if mcmc == 'zeus':
+                    EnsembleSampler = zeus.EnsembleSampler
+                else:
+                    EnsembleSampler = emcee.EnsembleSampler
+
+                p0 = random_p0(p0, scatter, nw)
+
+                sampler = EnsembleSampler(nw,
+                                          p0.shape[1],
+                                          self._lnprobability,
+                                          args=(p0[:, 0].mean(),
+                                                vlsr_mask,
+                                                dv_mask,
+                                                resample),
+                                          moves=moves,
+                                          pool=pool)
+
+                sampler.run_mcmc(p0, nb + ns, progress=progress,
+                                 **mcmc_kwargs)
+
+            # Split off the burnt in samples. Numpyro's _NumpyroSampler
+            # adapter mirrors emcee's chain shape (nw, nb+ns, ndim) with
+            # NaN-padded warmup, so the emcee slicing applies directly.
             if mcmc == 'zeus':
-                EnsembleSampler = zeus.EnsembleSampler
+                samples = sampler.chain[-ns:]
             else:
-                EnsembleSampler = emcee.EnsembleSampler
-
-            p0 = random_p0(p0, scatter, nwalkers[n % nwalkers.size])
-
-            sampler = EnsembleSampler(nwalkers[n % nwalkers.size],
-                                      p0.shape[1],
-                                      self._lnprobability,
-                                      args=(p0[:, 0].mean(),
-                                            vlsr_mask,
-                                            dv_mask,
-                                            resample),
-                                      moves=moves,
-                                      pool=pool)
-
-            total_steps = nburnin[n % nburnin.size] + nsteps[n % nsteps.size]
-            sampler.run_mcmc(p0, total_steps, progress=progress, **mcmc_kwargs)
-
-            # Split off the burnt in samples.
-
-            if mcmc == 'emcee':
-                samples = sampler.chain[:, -int(nsteps[n % nsteps.size]):]
-            else:
-                samples = sampler.chain[-int(nsteps[n % nsteps.size]):]
+                samples = sampler.chain[:, -ns:]
             samples = samples.reshape(-1, samples.shape[-1])
             p0 = np.median(samples, axis=0)
             time.sleep(0.5)
@@ -601,10 +641,12 @@ class annulus(Annulus):
         plots = ['walkers', 'corner'] if plots is None else plots
         plots = [p.lower() for p in np.atleast_1d(plots)]
         if 'walkers' in plots:
-            if mcmc == 'emcee':
-                walkers = sampler.chain.T
-            else:
+            if mcmc == 'zeus':
+                # zeus: (nsteps, nwalkers, ndim) -> (ndim, nsteps, nwalkers)
                 walkers = np.rollaxis(sampler.chain.copy(), 2)
+            else:
+                # emcee + numpyro adapter: (nwalkers, nsteps, ndim).T
+                walkers = sampler.chain.T
             plot_walkers(walkers, nburnin[-1], labels, True)
         if 'corner' in plots:
             plot_corner(samples, labels)
@@ -919,6 +961,163 @@ class annulus(Annulus):
                                   vlsr_mask=vlsr_mask,
                                   dv_mask=dv_mask,
                                   resample=resample)
+
+    # -- numpyro NUTS path for the GP fit -- #
+    #
+    # The emcee path above feeds the resampled, NaN-filtered spectrum to
+    # tinygp through ``deprojected_spectrum`` -> ``_resample_spectra``,
+    # which use scipy.stats.binned_statistic and boolean indexing — both
+    # produce data-dependent shapes that JAX cannot trace. The numpyro
+    # path skips resampling entirely and feeds the un-binned shifted
+    # spectra directly to a dense Matern32 GP. The pre-shift NaN mask
+    # (parameter-independent) is precomputed at first call so the
+    # likelihood has a fixed output shape for ``jax.jit``/``jax.grad``.
+
+    def _gp_finite_index(self):
+        """Cached (phi_idx, chan_idx, y_finite) over all finite spectrum
+        pixels. The masks are parameter-independent so they're computed
+        once and reused across NUTS steps."""
+        if not hasattr(self, '_gp_finite_cache'):
+            spectra = np.asarray(self.spectra)
+            finite = np.isfinite(spectra)
+            phi_idx, chan_idx = np.where(finite)
+            y_finite = spectra[phi_idx, chan_idx]
+            self._gp_finite_cache = (
+                jnp.asarray(phi_idx),
+                jnp.asarray(chan_idx),
+                jnp.asarray(y_finite),
+            )
+        return self._gp_finite_cache
+
+    def _lnlikelihood_jax_GP(self, theta, fit_vrad):
+        """JAX-traceable GP log-likelihood on the unbinned, shifted spectra.
+
+        Differs from :meth:`_lnlikelihood` in that it bypasses
+        ``deprojected_spectrum`` / ``_resample_spectra`` (numpy-only,
+        data-dependent shape) and the ``velax_mask`` window. Only the
+        parameter-independent finite-spectrum mask is applied. These
+        restrictions are checked upstream in :meth:`get_vlos_GP` before
+        the numpyro path is dispatched."""
+        if fit_vrad:
+            vrot, vrad = theta[0], theta[1]
+            noise, lnsigma, lnrho = theta[2], theta[3], theta[4]
+        else:
+            vrot, vrad = theta[0], 0.0
+            noise, lnsigma, lnrho = theta[1], theta[2], theta[3]
+
+        phi_idx, chan_idx, y = self._gp_finite_index()
+
+        theta_pol = jnp.asarray(self.theta)
+        inc_rad = jnp.asarray(float(self.inc_rad))
+        sin_inc_abs = jnp.sin(jnp.abs(inc_rad))
+        sin_inc_signed = jnp.sin(inc_rad)
+        vrot_proj = vrot * jnp.cos(theta_pol) * sin_inc_abs
+        vrad_proj = -vrad * jnp.sin(theta_pol) * sin_inc_signed
+        vlos = vrot_proj + vrad_proj                # (nphi,)
+
+        velax = jnp.asarray(self.velax)
+        x = velax[chan_idx] - vlos[phi_idx]         # (N,)
+
+        sigma2 = jnp.exp(2.0 * lnsigma)
+        rho = jnp.exp(lnrho)
+        kernel = sigma2 * kernels.Matern32(scale=rho)
+        gp = GaussianProcess(kernel, x, diag=noise ** 2, mean=jnp.mean(y))
+        return gp.log_probability(y)
+
+    def _numpyro_model_GP(self, vref, fit_vrad):
+        """numpyro model for :meth:`get_vlos_GP`.
+
+        The emcee path's bespoke ``_lnprior`` (parameter-dependent
+        ``|vrad/vrot| < 1`` bound) is translated to structured priors;
+        ``vrad`` is given the slightly-looser ``Uniform(-1.4*vref,
+        1.4*vref)`` since the original constraint folds vrad's range
+        into vrot's, and vrot is bounded by ``Uniform(0.6*vref,
+        1.4*vref)`` matching ``|vrot - vref|/vref < 0.4``. The
+        (positive-real, no upper bound) constraint on ``noise`` becomes
+        ``ImproperUniform`` on the positive cone — the same idiom used
+        for unbounded flat priors in :meth:`_numpyro_model_fitmap`."""
+        import numpyro
+        import numpyro.distributions as dist
+        from numpyro.distributions import constraints
+
+        vrot = numpyro.sample('vrot',
+                              dist.Uniform(0.6 * vref, 1.4 * vref))
+        if fit_vrad:
+            vrad = numpyro.sample('vrad',
+                                  dist.Uniform(-1.4 * vref, 1.4 * vref))
+
+        noise = numpyro.sample('noise',
+                               dist.ImproperUniform(constraints.positive,
+                                                    (), ()))
+        lnsigma = numpyro.sample('lnsigma', dist.Uniform(-15.0, 10.0))
+        lnrho = numpyro.sample('lnrho', dist.Uniform(0.0, 10.0))
+
+        if fit_vrad:
+            theta = jnp.stack([vrot, vrad, noise, lnsigma, lnrho])
+        else:
+            theta = jnp.stack([vrot, noise, lnsigma, lnrho])
+
+        numpyro.factor('lnL', self._lnlikelihood_jax_GP(theta, fit_vrad))
+
+    def _run_nuts_GP(self, p0, fit_vrad, num_chains, num_warmup,
+                     num_samples, **kwargs):
+        """Run numpyro NUTS over :meth:`_numpyro_model_GP` and return a
+        :class:`_NumpyroSampler` adapter so :meth:`get_vlos_GP`'s emcee
+        post-processing path consumes it without modification.
+        ``num_chains`` / ``num_warmup`` / ``num_samples`` map onto
+        ``nwalkers`` / ``nburnin`` / ``nsteps``; ``seed``,
+        ``progress``, and ``chain_method`` are forwarded to numpyro."""
+        if not _HAS_NUMPYRO:
+            raise ImportError(
+                "numpyro is required for mcmc='numpyro'. "
+                "Install with `pip install numpyro`.")
+        import numpyro.infer as ni
+        from numpyro.infer.initialization import init_to_value
+
+        seed = kwargs.pop('seed', 0)
+        progress = kwargs.pop('progress', True)
+        chain_method = kwargs.pop('chain_method', 'sequential')
+        kwargs.pop('scatter', None)   # legacy emcee kwarg, not used by NUTS
+
+        p0 = np.asarray(p0).astype(float)
+        vref = float(p0[0])
+
+        if fit_vrad:
+            free_keys = ('vrot', 'vrad', 'noise', 'lnsigma', 'lnrho')
+            init_values = {k: float(p0[i])
+                           for i, k in enumerate(free_keys)}
+        else:
+            free_keys = ('vrot', 'noise', 'lnsigma', 'lnrho')
+            init_values = {k: float(p0[i])
+                           for i, k in enumerate(free_keys)}
+
+        init_strategy = init_to_value(values=init_values)
+
+        nuts = ni.NUTS(self._numpyro_model_GP,
+                       init_strategy=init_strategy, **kwargs)
+        mcmc = ni.MCMC(nuts,
+                       num_warmup=num_warmup,
+                       num_samples=num_samples,
+                       num_chains=num_chains,
+                       progress_bar=progress,
+                       chain_method=chain_method)
+        mcmc.run(jax.random.PRNGKey(seed),
+                 vref=vref, fit_vrad=fit_vrad,
+                 extra_fields=('potential_energy',))
+
+        samples_dict = mcmc.get_samples(group_by_chain=True)
+        chain_post = jnp.stack([samples_dict[k] for k in free_keys],
+                               axis=-1)
+        warmup_pad = jnp.full((num_chains, num_warmup, len(free_keys)),
+                              jnp.nan)
+        chain = jnp.concatenate([warmup_pad, chain_post], axis=1)
+
+        pe = mcmc.get_extra_fields(group_by_chain=True)['potential_energy']
+        lnprob_post = -np.asarray(pe).T
+        lnprob_pad = np.full((num_warmup, num_chains), np.nan)
+        lnprobability = np.concatenate([lnprob_pad, lnprob_post], axis=0)
+
+        return _NumpyroSampler(np.asarray(chain), lnprobability)
 
     # -- Minimizing Line Width Approach -- #
 

@@ -382,9 +382,52 @@ Implemented as `rotationmap._run_nuts(...)`. Two implementation notes from the l
 
 2. **Sampler-shaped return.** `fit_map` post-processing reads `sampler.chain[:, :, idx] %= 360.0`, `sampler.get_chain(discard=, flat=True)`, `sampler.chain.T`, and `sampler.lnprobability[nburnin:]`. To avoid forking the post-processing path, `_run_nuts` returns a `_NumpyroSampler` adapter whose `chain` has shape `(num_chains, num_warmup + num_samples, ndim)` with the warmup region front-padded with NaN, and whose `lnprobability` is `-potential_energy` similarly NaN-padded. `np.array(...)` (not `np.asarray`) is used in the adapter so the array is writable — emcee's PA-wrap relies on in-place mutation.
 
-### 3.6 `Annulus3D.get_vlos_GP` (deferred)
+### 3.6 `Annulus3D.get_vlos_GP` — done 2026-05-10
 
-The GP-path `_lnprior` (`annulus.py:847`) uses bespoke checks (`abs(vrot - vref) / vref > 0.4`, `abs(vrad/vrot) > 1.0`, etc.) rather than the structured `priors_jax` registry. Translating to numpyro `dist` calls requires either rewriting `_lnprior` in terms of standard priors (cleaner, but a behaviour change) or implementing the constraints via `numpyro.factor(...)` penalties (preserves behaviour, less idiomatic). Defer to a Phase 3.x once 3.4–3.5 are validated.
+The original plan flagged the priors but missed the bigger obstacle: the GP likelihood pipeline (`deprojected_spectrum` → `_resample_spectra` → `scipy.stats.binned_statistic` → boolean-mask indexing) is numpy-only and produces **data-dependent output shapes**, so it cannot be traced by `jax.jit` / `numpyro` and NUTS cannot get gradients through it. Phase 2.6's celerite→tinygp swap made the kernel JAX-friendly but did not address the upstream resampling.
+
+**Approach taken: bypass resampling for the numpyro path.** A new JAX-traceable likelihood [`_lnlikelihood_jax_GP`](eddy/annulus.py) in `Annulus3D` feeds the *un-binned* shifted spectra directly to a dense Matern-3/2 GP. The parameter-independent NaN mask is precomputed once at first call ([`_gp_finite_index`](eddy/annulus.py)) so the likelihood has a fixed output shape. Restrictions checked at dispatch time and surfaced as clean `ValueError`s rather than silent ignores:
+
+- `resample` must be `False` (no JAX-traceable path through `binned_statistic`).
+- `velax_mask` must be at its default (the per-pixel velocity-window filter is parameter-dependent).
+- `vlsr_mask` / `dv_mask` are dead in the existing emcee path too (because `_lnlikelihood`'s call into `get_velocity_mask` passes `vrot_mask=None`, which short-circuits to all-True), so accepting them was already a no-op.
+
+**Prior translation.** The bespoke `_lnprior` (parameter-dependent `|vrad/vrot| < 1`) is translated to structured numpyro distributions in [`_numpyro_model_GP`](eddy/annulus.py):
+
+| original (emcee) | numpyro |
+|---|---|
+| `\|vrot - vref\|/vref < 0.4` | `dist.Uniform(0.6 * vref, 1.4 * vref)` |
+| `\|vrad/vrot\| < 1` | `dist.Uniform(-1.4 * vref, 1.4 * vref)` |
+| `noise > 0` | `dist.ImproperUniform(constraints.positive, ...)` |
+| `-15 < lnsigma < 10` | `dist.Uniform(-15.0, 10.0)` |
+| `0 ≤ lnrho ≤ 10` | `dist.Uniform(0.0, 10.0)` |
+
+The `vrad` translation is the only behaviour change: a slight relaxation of the parameter-dependent inner edge. The original constraint always nested inside `vrad ∈ (-1.4·vref, 1.4·vref)` (since `vrot ≤ 1.4·vref` by the `vrot` prior), so the box is the strict outer bound. In typical disk fits `|vrad| « vrot`, so the relaxation is essentially invisible.
+
+**Wiring.** `_NumpyroSampler` (the chain-shape adapter) was relocated from `rotationmap.py` to [`helper_functions.py`](eddy/helper_functions.py) so both `rotationmap.fit_map` and `Annulus3D.get_vlos_GP` import it from one place. `get_vlos_GP`'s sampler-selection block now branches on `mcmc == 'numpyro'` and calls [`_run_nuts_GP`](eddy/annulus.py), which produces a chain shape `(num_chains, num_warmup + num_samples, ndim)` matching emcee — so the existing `sampler.chain[:, -ns:]` post-processing applies unchanged. The walker plot path was tightened so the numpyro adapter goes through emcee's branch (`.T`) instead of zeus's `rollaxis`.
+
+**Validation — TWHya, beam-spaced annulus (41 spectra × 45 channels = 1845 GP points), 2026-05-10.**
+
+| budget | wall | samples |
+|---|---|---|
+| emcee: 16 walkers × (100 burnin + 100 sample) | 125 s | (1600, 4) |
+| numpyro NUTS: 1 chain × (100 warmup + 100 sample), `max_tree_depth=6` | 593 s | (100, 4) |
+
+| param | emcee 16/50/84 | numpyro 16/50/84 | \|Δmed\| / σ_emcee |
+|---|---|---|---|
+| vrot      | 2970 / 2982 / 2996       | 2963 / 2973 / 2982       | 0.70 |
+| noise     | 1.82e-3 / 1.85e-3 / 1.89e-3 | 1.78e-3 / 1.82e-3 / 1.85e-3 | 0.89 |
+| lnsigma   | −4.27 / −4.10 / −3.85    | −4.21 / −3.98 / −3.64    | 0.59 |
+| lnrho     |  6.42 /  6.55 /  6.71    |  6.49 /  6.65 /  6.94    | 0.69 |
+
+All four parameters agree to within ≤0.9σ — wiring is statistically sound. emcee is ~5× faster wall-time on this problem because numpyro's NUTS pays for `jax.grad` through the dense Cholesky (an O(N³) backward pass per leapfrog step). For a 1845-point dense GP the gradient cost dominates; `quasisep.Matern32` would give O(N) but requires a static sort order and the deprojection re-orders points by `vlos`, so it isn't a drop-in.
+
+**Practical guidance for users:**
+- For typical GP-annulus fits, `mcmc='emcee'` remains the fastest path.
+- `mcmc='numpyro'` is useful when you want HMC/NUTS-style adaptation or when the posterior is too narrow for ensemble samplers to explore efficiently. Plan for ~5–10× the per-step wall time vs emcee.
+- `mcmc='numpyro'` requires `resample=False` and the default `velax_mask`. Set `mcmc_kwargs={'max_tree_depth': 6}` to cap leapfrog steps and keep the wall time bounded; the default 10 doubles wall time on this problem with no posterior gain.
+
+Two slow-marked tests in [`tests/test_annulus.py`](tests/test_annulus.py) (`test_annulus3d_get_vlos_gp` and `test_annulus3d_get_vlos_gp_numpyro`) cover the emcee and numpyro GP paths; both pass. They are opt-in via `pytest -m slow` because each takes 30 s–2 min on a CPU.
 
 ### Implementation order
 
@@ -448,7 +491,7 @@ Returns a `momentmap` instance (or `rotationmap` if `method='first'` or `method=
 | 2.6 | celerite → tinygp swap for GP annulus | High | ✅ Done (`767b044`) |
 | 3.1 | numpyro dependency + `_HAS_NUMPYRO` detection + emcee default | XS | ✅ Done |
 | 3.3–3.5 | numpyro NUTS sampler for `fit_map` (model, runner, internal kwarg mapping) | High | ✅ Done — emcee/numpyro medians agree to within sampling noise on a 5-param HD163296 smoke fit (Δmstar ≈ 0.07, ΔPA ≈ 0.2°, Δvlsr ≈ 7 m/s) |
-| 3.6 | numpyro NUTS for `Annulus3D.get_vlos_GP` | Medium-high | ⏭ Deferred (needs `_lnprior` refactor first) |
+| 3.6 | numpyro NUTS for `Annulus3D.get_vlos_GP` | Medium-high | ✅ Done — bypasses `_resample_spectra` (un-traceable scipy `binned_statistic`), feeds the unbinned shifted spectra to a dense Matern-3/2 GP. Bespoke `_lnprior` translated to structured priors with one mild relaxation (`vrad ~ Uniform(-1.4·vref, 1.4·vref)` instead of `|vrad/vrot| < 1`). Validated against emcee on TWHya (TWHya tutorial annulus, beam-spaced): all four parameters agree to within ≤0.9σ at matched budget. |
 | 4.2 | `to_momentmap()` | Medium | ⏭ Stubbed with `NotImplementedError` |
 | 5.1 | Tutorial-scale Phase 3 validation | Low | ✅ Done — emcee/numpyro medians agree to within 0.2σ on all 9 params (HD163296 3D fit, 128 walkers × 1000+1000 vs. 1 chain × 500+500). Surfaced & fixed three latent JAX-autodiff bugs along the way. |
 | 5.2 | Tutorial demonstrating `mcmc='numpyro'` | Low | ✅ Done — `docs/tutorials/tutorial_6_numpyro.ipynb` mirroring tutorial 2's HD163296 setup; wired into `docs/index.rst` |

@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import scipy.constants as sc
 from .imagecube import imagecube
 from .momentmap import momentmap
-from .helper_functions import plot_walkers, plot_corner, random_p0
+from .helper_functions import plot_walkers, plot_corner, random_p0, _NumpyroSampler
 import matplotlib.pyplot as plt
 import warnings
 
@@ -24,25 +24,6 @@ except ImportError:
 # numpyro is installed so existing scripts retain identical walker semantics
 # and posterior shapes; users opt into NUTS via sampler='numpyro'.
 _default_sampler = 'emcee'
-
-
-class _NumpyroSampler:
-    """Thin adapter that exposes a numpyro NUTS run via the subset of the
-    emcee/zeus EnsembleSampler interface that ``fit_map`` post-processing
-    consumes (`chain`, `lnprobability`, and `get_chain`). The chain is
-    front-padded with NaN over the warmup region so a downstream
-    ``get_chain(discard=nburnin)`` works without special-casing the backend.
-    """
-
-    def __init__(self, chain, lnprobability):
-        self.chain = np.array(chain)   # copy: fit_map may modify in place (e.g. PA wrap)
-        self.lnprobability = np.array(lnprobability)
-
-    def get_chain(self, discard=0, flat=False):
-        out = self.chain[:, discard:, :]
-        if flat:
-            return out.reshape(-1, out.shape[-1])
-        return out
 
 
 class rotationmap(momentmap):
