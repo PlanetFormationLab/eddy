@@ -789,13 +789,21 @@ class rotationmap(momentmap):
         moves = kwargs.pop('moves', None)
         pool = kwargs.pop('pool', None)
 
-        # Build a JIT'd log-likelihood closure once before the chain
-        # runs. The hot loop (nwalkers * (nburnin + nsteps) calls) then
-        # hits a compiled function instead of paying per-jnp-op Python
-        # dispatch cost on every model evaluation. The prior is kept on
-        # the numpy/Python side so out-of-bounds proposals short-circuit
-        # without entering the trace.
-        ln_prob_fn = self._build_fast_ln_probability(params)
+        # Build a JIT'd log-likelihood closure when running
+        # single-process so the hot loop hits a compiled function
+        # instead of paying per-jnp-op Python dispatch cost on every
+        # model evaluation. The closure is a local function and
+        # therefore not picklable, which means we cannot use it with
+        # ``multiprocessing.Pool`` -- workers ``ForkingPickler``-send
+        # the log-prob callable across the IPC boundary. When ``pool``
+        # is supplied we fall back to ``self._ln_probability``
+        # (a regular method, picklable); each worker pays per-call JAX
+        # dispatch but the work is spread across cores. Single-process
+        # users still see the ~4x speedup from the JIT path.
+        if pool is None:
+            ln_prob_fn = self._build_fast_ln_probability(params)
+        else:
+            ln_prob_fn = self._ln_probability
 
         sampler = EnsembleSampler(nwalkers,
                                   p0.shape[1],
