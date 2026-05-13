@@ -2,7 +2,6 @@
 
 import os
 import numpy as np
-import scipy.constants as sc
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 
@@ -126,7 +125,6 @@ class linecube(imagecube):
         # construction path.
         import contextlib
         import io
-        import os
         import tempfile
         from astropy.io import fits
 
@@ -462,7 +460,7 @@ class linecube(imagecube):
 
         if return_samples:
             return samples
-        
+
         rpnts = samples[0][0]
         profiles = np.array([s[1] for s in samples])
 
@@ -476,10 +474,10 @@ class linecube(imagecube):
 
         if np.all(np.sum(weights, axis=0) == 0.0):
             weights = np.ones(profiles.shape)
-        
+
         weights = np.where(np.isfinite(weights), weights, 1.0)
         weights += 1e-10 * np.random.randn(weights.size).reshape(weights.shape)
-        
+
         M = np.sum(weights != 0.0, axis=0)
 
         # Weighted average.
@@ -672,7 +670,7 @@ class linecube(imagecube):
                                       outframe='cartesian',
                                       flatten=True)[:2]
         xsky, ysky = xsky[mask], ysky[mask]
-        
+
         iidx, jidx = np.meshgrid(np.arange(self.nypix), np.arange(self.nxpix))
         iidx, jidx = iidx.flatten()[mask], jidx.flatten()[mask]
 

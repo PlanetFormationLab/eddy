@@ -317,7 +317,7 @@ class annulus(Annulus):
 
         TWo arrays will be returned: ``v`` and ``dv`` which are the velocity
         profiles and uncertainties, respectively. Both ``v`` and ``dv``
-        will have a size of 3, representing the three velocity components, 
+        will have a size of 3, representing the three velocity components,
         ``v_phi``, ``v_r`` and ``v_z``. As not all methods return the same
         components, those that are unable to be calculated will be populated
         with ``NaN``s.
@@ -432,7 +432,7 @@ class annulus(Annulus):
             cvar = np.ones(popt.size) * np.nan
 
         elif fit_method == 'sho':
-            popt, cvar = self.get_vlos_SHO(p0=p0, 
+            popt, cvar = self.get_vlos_SHO(p0=p0,
                                            fit_vrad=fit_vrad,
                                            fix_vlsr=fix_vlsr,
                                            vrot_mask=vrot_mask,
@@ -448,7 +448,7 @@ class annulus(Annulus):
             cvar = np.array([cvar[0],
                              cvar[1] if fit_vrad else np.nan,
                              cvar[-1]])
-            
+
         # If required, iterate using these results as a mask. This is only
         # available with SHO given that a systemic velocity is required.
 
@@ -484,9 +484,9 @@ class annulus(Annulus):
                                            centroid_method=centroid_method,
                                            repeat_with_mask=repeat_with_mask-1)
 
-            except:
+            except Exception:
                 return popt, cvar
-        
+
         return popt, cvar
 
     # -- Gaussian Processes Approach -- #
@@ -497,7 +497,7 @@ class annulus(Annulus):
         optimize_kwargs=None, mcmc_kwargs=None):
         """
         Determine the azimuthally averaged rotational (and optionally radial)
-        velocity by finding the greatest overlap between 
+        velocity by finding the greatest overlap between
 
         Args:
             p0 (optional[list]): Starting positions.
@@ -1138,7 +1138,7 @@ class annulus(Annulus):
     # -- Minimizing Line Width Approach -- #
 
     def get_vlos_dV(self, p0=None, fit_vrad=False, resample=False,
-            vrot_mask=None, vlsr_mask=None, vrad_mask=None, dv_mask=None, 
+            vrot_mask=None, vlsr_mask=None, vrad_mask=None, dv_mask=None,
             optimize_kwargs=None):
         """
         Infer the rotational (and optically radial) velocity by minimizing the
@@ -1487,7 +1487,7 @@ class annulus(Annulus):
         """
 
         # Smooth the spectra before interpolating.
-        
+
         spectra = self.spectra.copy()
         if smooth is not None:
             from scipy.ndimage import convolve1d
@@ -1556,12 +1556,12 @@ class annulus(Annulus):
         Returns ``(x, y[, dy])`` of the collapsed and deprojected spectrum
         using the provided velocities to deproject the data. When collapsing the
         spectra the velocity grid can be changed with the ``resample`` argument.
-        
+
         Note that the rotational and radial velocities are specified in the disk
         frame and do not take into account the projection along the line of
         sight. Remember that a positive radial velocity is moving away from the
         star.
-        
+
         Different methods to resample the data can also be applied.
 
             ``reasmple=False`` - returns the unbinned, shifted pixels.
@@ -1597,7 +1597,7 @@ class annulus(Annulus):
         Returns:
             A deprojected spectrum, resampled using the provided method.
         """
-        
+
         vlos = self.calc_vlos(vrot=vrot, vrad=vrad)
         vpnts = self.velax[None, :] - vlos[:, None]
         spnts = self.spectra.copy()
@@ -1613,7 +1613,7 @@ class annulus(Annulus):
 
         vpnts, spnts = self._order_spectra(vpnts=vpnts[velocity_mask],
                                            spnts=spnts[velocity_mask])
-        
+
         x, y, dy = self._resample_spectra(vpnts=vpnts,
                                           spnts=spnts,
                                           resample=resample,
@@ -1623,7 +1623,7 @@ class annulus(Annulus):
         if scatter:
             return x[mask], y[mask], dy[mask]
         return x[mask], y[mask]
-    
+
     def get_velocity_mask(self, vrot_mask=None, vlsr_mask=0.0, vrad_mask=None, dv_mask=None):
         """
         Returns a mask based on an assumed rotational and radial velocity
@@ -1689,7 +1689,7 @@ class annulus(Annulus):
 
         Args:
             method (str): Method used to determine the line centroid. Must be
-                in ['max', 'quadratic', 'gaussian', 'gaussthick', 'doublegauss', 
+                in ['max', 'quadratic', 'gaussian', 'gaussthick', 'doublegauss',
                 'doublegauss_fixeddv]. The former returns the pixel of maximum
                 value, 'quadratic' fits a quadratic function to the pixel of
                 maximum value and its two neighbouring pixels (see Teague &
@@ -1716,45 +1716,45 @@ class annulus(Annulus):
         # Cycle through the methods and apply.
 
         method = method.lower()
-       
+
         if method == 'max':
             vmax = np.array([v[np.argmax(s)] for v, s in zip(velax, spectra)])
             dvmax = np.ones(vmax.size) * self.chan
-       
+
         elif method == 'quadratic':
             from bettermoments.quadratic import quadratic
             vmax = [quadratic(s, uncertainty=self.rms,
                               x0=v[0], dx=self.chan)
                     for v, s in zip(velax, spectra)]
             vmax, dvmax = np.array(vmax).T[:2]
-       
+
         elif method == 'gaussian':
             from .helper_functions import get_gaussian_center
             vmax = [get_gaussian_center(v, s, self.rms)
                     for v, s in zip(velax, spectra)]
             vmax, dvmax = np.array(vmax).T
-       
+
         elif method == 'gaussthick':
             from .helper_functions import get_gaussthick_center
             vmax = [get_gaussthick_center(v, s, self.rms)
                     for v, s in zip(velax, spectra)]
             vmax, dvmax = np.array(vmax).T
-        
+
         elif method == 'doublegauss':
             from .helper_functions import get_doublegauss_center
             vmax = [get_doublegauss_center(v, s, self.rms)
                     for v, s in zip(velax, spectra)]
             vmax, dvmax = np.array(vmax).T
-        
+
         elif method == 'doublegauss_fixeddv':
             from .helper_functions import get_doublegauss_fixeddV_center
             vmax = [get_doublegauss_fixeddV_center(v, s, self.rms)
                     for v, s in zip(velax, spectra)]
             vmax, dvmax = np.array(vmax).T
-        
+
         else:
             raise ValueError(f"Unknown method, {method}.")
-        
+
         return vmax, dvmax
 
     def _order_spectra(self, vpnts, spnts=None):
@@ -2310,7 +2310,7 @@ class annulus(Annulus):
                 label += r'$\pm$' + ' {:.0f} m/s'.format(dv_r)
                 ax.text(0.975, 0.825, label, va='top', ha='right', color='r',
                         transform=ax.transAxes)
-                
+
             if v_z is not None:
                 label = r'$v_{z,\, proj}$' + ' = {:.0f} '.format(v_z)
                 label += r'$\pm$' + ' {:.0f} m/s'.format(dv_z)

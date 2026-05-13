@@ -62,6 +62,31 @@ markers = [
     "slow: marks tests that take more than a few seconds (deselect with '-m \"not slow\"')",
 ]
 
+[tool.ruff]
+target-version = "py310"
+# Match the loose long-line style of the existing astronomy codebase
+# rather than blindly hard-wrapping at 79 chars. 120 accommodates the
+# one LaTeX equation in `rotationmap.fit_annuli`'s docstring without
+# special-casing.
+line-length = 120
+extend-exclude = [
+    "docs/tutorials",  # executed notebooks have generated lines longer than the limit
+    "paper",
+]
+
+[tool.ruff.lint]
+# Only the truly fundamental checks: real bugs (F), basic pycodestyle
+# (E/W). Import sorting, naming, and stylistic preferences are
+# intentionally not enabled — they would generate noise without
+# substantive value for a small scientific package.
+select = ["E", "F", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# eddy/__init__.py deliberately configures JAX (jax.config.update) before
+# importing the submodules; that triggers E402 (module-level import not
+# at top of file) which is the desired idiom here, not a bug.
+"eddy/__init__.py" = ["E402"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["eddy*"]

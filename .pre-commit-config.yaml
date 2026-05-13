@@ -1,0 +1,25 @@
+# pre-commit config for the eddy project. Run `pre-commit install`
+# once after cloning; commits then run these checks automatically.
+# See https://pre-commit.com for details.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Notebook outputs and FITS payloads can have trailing spaces
+        # legitimately; let ruff handle Python whitespace.
+        exclude: '\.(ipynb|fits)$'
+      - id: end-of-file-fixer
+        exclude: '\.(ipynb|fits)$'
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]   # tutorial 6's executed output is ~1.9 MB
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff
+        args: ["--fix"]

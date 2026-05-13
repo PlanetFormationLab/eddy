@@ -6,7 +6,6 @@ through ``_consistent_header``; the 2D map exercises the
 spatial-only path.
 """
 
-import os
 
 import numpy as np
 import pytest

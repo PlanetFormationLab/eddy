@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-import time
 import yaml
 import zeus
 import emcee
@@ -393,7 +392,7 @@ class rotationmap(momentmap):
 
         rpnts, rbins = self._get_radial_bins(rpnts=rpnts,
                                              rbins=rbins)
-        
+
         rvals, pvals = self.disk_coords(x0=x0,
                                         y0=y0,
                                         inc=inc,
@@ -480,7 +479,7 @@ class rotationmap(momentmap):
 
             # Combine the values using a weighted average if niter > 1.
             # velo_tmp.shape = [niter, 4]
-    
+
             velo_tmp = np.array(velo_tmp)
             dvelo_tmp = np.array(dvelo_tmp)
             if niter == 1:
@@ -498,7 +497,7 @@ class rotationmap(momentmap):
                 dvelo += [wstd]
             else:
                 raise ValueError("Unknown `niter` value.")
-            
+
         # Combine all the results into [4, rpnts] shaped arrays to deproject.
 
         velo = np.atleast_2d(np.squeeze(velo)).T
@@ -516,7 +515,7 @@ class rotationmap(momentmap):
                               velo[1] * -np.sin(np.radians(inc)),
                               velo[2] * -np.cos(np.radians(inc)),
                               velo[3]])
-        
+
         model = self._evaluate_annuli_model(rpnts=rpnts,
                                             velo_proj=velo_proj,
                                             rvals=rvals,
@@ -678,7 +677,7 @@ class rotationmap(momentmap):
         """
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
-    
+
         if vmin is None or vmax is None:
             vmin_tmp, vmax_tmp = np.nanpercentile(self.data, [2, 98])
             vmax_tmp = max(abs(vmin_tmp - self.vlsr), abs(vmax_tmp - self.vlsr))
@@ -1094,7 +1093,7 @@ class rotationmap(momentmap):
             if key in rotationmap.priors.keys() and params[key] is not None:
                 try:
                     lnp += rotationmap.priors[key](params[key])
-                except:
+                except Exception:
                     print(key, params[key])
                 if not np.isfinite(lnp):
                     return lnp
@@ -1318,7 +1317,7 @@ class rotationmap(momentmap):
 
         else:
             raise ValueError("'draws' must be a float or integer.")
-        
+
     def evaluate_models_vortex(self, samples=None, params=None, draws=50,
             collapse_func=np.median, frame=None):
         """
@@ -1355,11 +1354,11 @@ class rotationmap(momentmap):
 
         if params is None:
             raise ValueError("Must provide model parameters dictionary.")
-        
+
         # NOTE: Calculate the coordinates needed for this. Note that this won't
         # be exactly the same draws (if draws > 1) but for a well sampled
         # posterior and a large enough draw value this should be OK...
-        
+
         rvals, tvals, _ = self.evaluate_models(samples=samples,
                                                params=params,
                                                draws=draws,
@@ -1369,11 +1368,11 @@ class rotationmap(momentmap):
 
         if samples is None:
             verified_params = self.verify_params_dictionary(params.copy())
-            return self._make_model_vortex(rvals=rvals, 
+            return self._make_model_vortex(rvals=rvals,
                                            tvals=tvals,
                                            params=verified_params,
                                            frame=frame)
-        
+
         # Now do a random number of draws. Check to make sure the `params`
         # dictionary has the same number of free parameters as there are in
         # `samples`.
@@ -1392,18 +1391,18 @@ class rotationmap(momentmap):
             models = []
             for idx in np.random.randint(0, samples.shape[0], draws):
                 tmp = self._populate_dictionary(samples[idx], verified_params)
-                models += [self._make_model_vortex(rvals=rvals, 
+                models += [self._make_model_vortex(rvals=rvals,
                                                    tvals=tvals,
                                                    params=tmp,
                                                    frame=frame)]
             return collapse_func(models, axis=0)
-        
+
         # Take a percentile of the samples.
 
         elif isinstance(draws, float):
             tmp = np.percentile(samples, draws, axis=0)
             tmp = self._populate_dictionary(tmp, verified_params)
-            self._make_model(rvals=rvals, 
+            self._make_model(rvals=rvals,
                              tvals=tvals,
                              params=tmp,
                              frame=frame)
@@ -1412,7 +1411,7 @@ class rotationmap(momentmap):
 
         else:
             raise ValueError("'draws' must be a float or integer.")
-        
+
     def save_model(self, samples=None, params=None, model=None, filename=None,
                    overwrite=True):
         """
@@ -1812,7 +1811,7 @@ class rotationmap(momentmap):
         data_tmp = self.data.copy()
 
         for _ in range(niter):
-        
+
             # Cycle through each pixel and identify the hot pixels.
 
             coldpix = np.ones(data_tmp.shape) * np.nan
@@ -1824,14 +1823,14 @@ class rotationmap(momentmap):
                     region_std = np.nanstd(region)
                     if abs(point - region_mu) < (nsigma * region_std):
                         coldpix[yi, xi] = point
-                        
+
             # Convolve, interpolating the NaN value, and re-mask based on the
-            # old data. 
-            
+            # old data.
+
             hotpix = np.logical_and(np.isfinite(self.data), np.isnan(coldpix))
             coldpix = convolve(coldpix, Box2DKernel(2*npix+1))
             data_tmp = np.where(hotpix, coldpix, data_tmp)
-        
+
         # Either replace the attached data or return as an array.
 
         if not replace:
@@ -2141,7 +2140,7 @@ class rotationmap(momentmap):
         std = np.nanpercentile(v_rad, [16, 84])
         std = 0.5 * (std[1] - std[0])
         v_rad_ylim = (-3.0 * std, 3.0 * std)
- 
+
         axs[1].errorbar(rpnts, v_rad, dv_rad, fmt='-o', ms=3)
         axs[1].set_xticklabels([])
         axs[1].set_ylabel(r'$v_{\rm r}$' + ' (m/s)')
