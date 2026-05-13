@@ -6,3 +6,5 @@
 *.tar.gz
 *_dev.ipynb
 dist/
+.claude/
+wget-log*
