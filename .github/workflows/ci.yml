@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [master, refactoring]
+  pull_request:
+    branches: [master]
+
+# Cancel an in-flight run for a branch when a new commit is pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install eddy
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      # The pytest smoke suite reuses FITS files that live in
+      # docs/tutorials/ but are gitignored. Cache them across runs so
+      # we only download once per matrix entry per cache key.
+      - name: Cache tutorial FITS fixtures
+        id: cache-fits
+        uses: actions/cache@v4
+        with:
+          path: docs/tutorials/*.fits
+          key: tutorial-fits-v1
+
+      - name: Download tutorial FITS fixtures
+        if: steps.cache-fits.outputs.cache-hit != 'true'
+        working-directory: docs/tutorials
+        run: |
+          set -euo pipefail
+          base="https://dataverse.harvard.edu/api/access/datafile"
+          curl -fsSL -o HD163296_CO_v0.fits \
+            "${base}/:persistentId?persistentId=doi:10.7910/DVN/C2ZUNO/AWCSZR"
+          curl -fsSL -o HD163296_CO_dv0.fits \
+            "${base}/:persistentId?persistentId=doi:10.7910/DVN/C2ZUNO/NGOW49"
+          curl -fsSL -o TWHya_CO_cube.fits \
+            "${base}/:persistentId?persistentId=doi:10.7910/DVN/PXDKBC/QULHRK"
+          curl -fsSL -o TWHya_CO_cube_v0.fits \
+            "${base}/:persistentId?persistentId=doi:10.7910/DVN/KXELJL/VPLAM7"
+
+      - name: Verify fixtures present
+        working-directory: docs/tutorials
+        run: |
+          set -euo pipefail
+          for f in HD163296_CO_v0.fits HD163296_CO_dv0.fits \
+                  TWHya_CO_cube.fits TWHya_CO_cube_v0.fits; do
+            test -s "$f" || { echo "missing fixture: $f"; exit 1; }
+          done
+          ls -lh *.fits
+
+      - name: Run pytest
+        env:
+          # Force JAX onto CPU for deterministic CI; JIT compile noise
+          # otherwise dominates the per-test timing.
+          JAX_PLATFORMS: cpu
+        run: pytest -v --tb=short
