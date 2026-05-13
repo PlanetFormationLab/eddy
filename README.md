@@ -2,9 +2,13 @@
 
 <p align='center'>
   <br/>
-  <img src="https://github.com/richteague/eddy/blob/master/docs/_static/eddy_logo.png" width="500" height="500">
+  <img src="https://github.com/PlanetFormationLab/eddy/blob/master/docs/_static/eddy_logo.png" width="500" height="500">
   <br/>
   <br/>
+  <a href="https://pypi.org/project/astro-eddy/"><img src="https://img.shields.io/pypi/v/astro-eddy.svg" alt="PyPI version" />
+  </a>
+  <a href="https://pypi.org/project/astro-eddy/"><img src="https://img.shields.io/pypi/pyversions/astro-eddy.svg" alt="Python versions" />
+  </a>
   <a href="http://joss.theoj.org/papers/2868c5ad4b6405eba1aaf1cd8ea53274"><img src="http://joss.theoj.org/papers/2868c5ad4b6405eba1aaf1cd8ea53274/status.svg">
   </a>
   <a href='https://eddy.readthedocs.io/en/latest/?badge=latest'><img src='https://readthedocs.org/projects/eddy/badge/?version=latest' alt='Documentation Status' />
@@ -21,6 +25,8 @@
 
 `eddy` is a suite of Python tools to recover precise velocity profiles of protoplanetary disks from Doppler shifted line emission. `eddy` makes fitting of first moment maps and the inference of a rotation velocity from an annulus of spectra a breeze.
 
+As of v3.0.0, the rotation-map model and likelihood are JAX-backed: JIT-compiled, autodifferentiable, and GPU-aware. Sampling can be done either with [`emcee`](https://github.com/dfm/emcee) (the default) or [`numpyro`](https://github.com/pyro-ppl/numpyro) NUTS via `mcmc='numpyro'`; the Gaussian-process annulus path uses [`tinygp`](https://github.com/dfm/tinygp).
+
 ## Installation
 
 The most simple method is with `pip`,
@@ -29,13 +35,21 @@ The most simple method is with `pip`,
 pip install astro-eddy
 ```
 
-The only real dependencies for this are `numpy`, `scipy`, `matplotlib`, and [`emcee`](https://github.com/dfm/emcee), If you want to run the Gaussian Process method you will also need [`celerite`](https://github.com/dfm/celerite) which can be easily installed if you follow their [installation guide](https://celerite.readthedocs.io/en/stable/python/install/).
+Runtime dependencies are pulled in automatically: `numpy`, `scipy`, `matplotlib`, `jax`, `jaxlib`, `emcee`, `zeus-mcmc`, `numpyro`, `tinygp`, `corner`, and `bettermoments`. Python 3.10 or newer.
 
-If things have installed correctly you should be able to run the [Jupyter Notebooks](https://github.com/richteague/eddy/tree/master/docs/tutorials) with no errors. If something goes wrong, please [open an issue](https://github.com/richteague/eddy/issues/new).
+For an editable development install,
+
+```
+git clone https://github.com/PlanetFormationLab/eddy.git
+cd eddy
+pip install -e ".[test]"   # add test extras for running pytest
+```
+
+If things have installed correctly you should be able to run the [Jupyter Notebooks](https://github.com/PlanetFormationLab/eddy/tree/master/docs/tutorials) with no errors. If something goes wrong, please [open an issue](https://github.com/PlanetFormationLab/eddy/issues/new).
 
 ## Useage
 
-For guides on how to use `eddy` you will find extensive examples in the [documents](https://github.com/richteague/eddy/tree/master/docs). We shamelessly recommend [bettermoments](https://github.com/richteague/bettermoments) to make the moment maps required for the fitting.
+For guides on how to use `eddy` you will find extensive examples in the [documents](https://github.com/PlanetFormationLab/eddy/tree/master/docs). We shamelessly recommend [bettermoments](https://github.com/richteague/bettermoments) to make the moment maps required for the fitting.
 
 ## Citations
 

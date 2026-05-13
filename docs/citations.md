@@ -32,7 +32,11 @@ In addition, if you used any of the fitting routines then please also cite the f
     doi = {10.1086/670067}
 }
 
-@article{celerite, % for the gaussian procceses
+% The GP backend is `tinygp`, the JAX-native successor to `celerite`. The
+% original `celerite` paper introduces the quasi-separable Matern-3/2 kernel
+% still in use, so it remains worth citing alongside the `tinygp` software
+% reference.
+@article{celerite,
     author = {{Foreman-Mackey}, D. and {Agol}, E. and {Angus}, R. and
               {Ambikasaran}, S.},
     title = {Fast and scalable Gaussian process modeling
@@ -43,6 +47,28 @@ In addition, if you used any of the fitting routines then please also cite the f
     pages = {220},
     doi = {10.3847/1538-3881/aa9332},
     url = {https://arxiv.org/abs/1703.09710}
+}
+
+@software{tinygp, % for the GP annulus path
+    author = {Foreman-Mackey, Dan and others},
+    title = {{tinygp: The tiniest of Gaussian Process libraries}},
+    url = {https://github.com/dfm/tinygp},
+    doi = {10.5281/zenodo.7269074}
+}
+
+@software{numpyro, % for mcmc='numpyro' (NUTS) in fit_map / get_vlos
+    author = {Phan, Du and Pradhan, Neeraj and Jankowiak, Martin},
+    title = {{Composable Effects for Flexible and Accelerated Probabilistic
+              Programming in NumPyro}},
+    year = {2019},
+    eprint = {1912.11554}
+}
+
+@software{jax, % for the JAX backend
+    author = {Bradbury, James and others},
+    title = {{JAX: composable transformations of Python+NumPy programs}},
+    url = {http://github.com/google/jax},
+    year = {2018}
 }
 
 @article{corner, % for the covariance plots

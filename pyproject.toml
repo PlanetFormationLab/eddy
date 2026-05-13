@@ -42,6 +42,13 @@ dependencies = [
 test = [
     "pytest>=7",
 ]
+docs = [
+    "sphinx>=1.7.5",
+    "jupyter",
+    "nbsphinx",
+    "pygments>=2.4.1",
+    "sphinx_rtd_theme",
+]
 
 [project.urls]
 Homepage = "https://github.com/PlanetFormationLab/eddy"
