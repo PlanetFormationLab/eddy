@@ -211,7 +211,6 @@ class rotationmap(momentmap):
 
         # Set up and run the MCMC with emcee.
 
-        time.sleep(0.5)
         nsteps = np.atleast_1d(nsteps)
         nburnin = np.atleast_1d(nburnin)
         nwalkers = np.atleast_1d(nwalkers)
@@ -764,7 +763,6 @@ class rotationmap(momentmap):
             print("WARNING: scipy.optimize did not converge.")
             print("Starting positions:")
         print('\tp0 =', ['%.2e' % t for t in theta])
-        time.sleep(0.3)
         return theta
 
     def _run_mcmc(self, p0, params, nwalkers, nburnin, nsteps, mcmc, **kwargs):
@@ -789,28 +787,34 @@ class rotationmap(momentmap):
         moves = kwargs.pop('moves', None)
         pool = kwargs.pop('pool', None)
 
-        # Build a JIT'd log-likelihood closure when running
-        # single-process so the hot loop hits a compiled function
-        # instead of paying per-jnp-op Python dispatch cost on every
-        # model evaluation. The closure is a local function and
-        # therefore not picklable, which means we cannot use it with
-        # ``multiprocessing.Pool`` -- workers ``ForkingPickler``-send
-        # the log-prob callable across the IPC boundary. When ``pool``
-        # is supplied we fall back to ``self._ln_probability``
-        # (a regular method, picklable); each worker pays per-call JAX
-        # dispatch but the work is spread across cores. Single-process
-        # users still see the ~4x speedup from the JIT path.
+        # Single-process: build a vmap'd JIT closure that handles the
+        # whole walker batch in one XLA dispatch. emcee calls the
+        # log-prob once per step (via ``vectorize=True``) instead of
+        # nwalkers times in a Python loop, and XLA vectorises the
+        # model evaluation across walkers. ~5x speedup per walker-eval
+        # on top of the per-call JIT win.
+        #
+        # ``Pool``: the JIT'd closure isn't picklable (ForkingPickler
+        # requires top-level functions / bound methods). Fall back to
+        # the per-walker ``self._ln_probability`` method which is
+        # picklable; cross-core parallelism then replaces JIT'd batch
+        # vectorisation. (Tutorial 2 is the canonical example.)
         if pool is None:
-            ln_prob_fn = self._build_fast_ln_probability(params)
+            ln_prob_fn = self._build_vectorized_ln_probability(params)
+            sampler = EnsembleSampler(nwalkers,
+                                      p0.shape[1],
+                                      ln_prob_fn,
+                                      args=[params, np.nan],
+                                      moves=moves,
+                                      pool=pool,
+                                      vectorize=True)
         else:
-            ln_prob_fn = self._ln_probability
-
-        sampler = EnsembleSampler(nwalkers,
-                                  p0.shape[1],
-                                  ln_prob_fn,
-                                  args=[params, np.nan],
-                                  moves=moves,
-                                  pool=pool)
+            sampler = EnsembleSampler(nwalkers,
+                                      p0.shape[1],
+                                      self._ln_probability,
+                                      args=[params, np.nan],
+                                      moves=moves,
+                                      pool=pool)
 
         progress = kwargs.pop('progress', True)
 
@@ -818,41 +822,45 @@ class rotationmap(momentmap):
 
         return sampler
 
-    def _build_fast_ln_probability(self, params):
-        """Return a ``(theta, *unused) -> float`` callable for emcee/zeus
-        that JIT-compiles the chi-squared model+likelihood once and reuses
-        the compiled function across all walker proposals.
+    def _build_vectorized_ln_probability(self, params):
+        """Return a ``(coords, *unused) -> ndarray`` callable for
+        ``emcee.EnsembleSampler(..., vectorize=True)`` that JIT-compiles
+        a vmap'd log-posterior once and reuses the compiled function
+        across all walker batches.
+
+        ``coords`` has shape ``(nwalkers_subset, ndim)`` -- emcee's
+        red-blue move feeds half the walker complement per call. XLA
+        vectorises the model evaluation across the batch axis, so one
+        compiled call handles every walker in the subset.
 
         The free-parameter values vary per call; everything else in
         ``params`` (vfunc, boolean flags like ``beam`` / ``vortex``,
-        fixed scalars like ``inc`` / ``dist``, the deprojection callables,
-        and ``self.data`` / ``self.mask`` / ``self.ivar``) is captured at
-        trace time and baked into the compiled function as constants. As
-        long as the dict's structural keys don't change across calls
-        (they don't, inside a single ``_run_mcmc``), JAX hits the cached
-        trace on every iteration."""
+        fixed scalars like ``inc`` / ``dist``, the deprojection
+        callables, and ``self.data`` / ``self.mask`` / ``self.ivar``)
+        is captured at trace time and baked in as constants. As long as
+        the dict's structural keys don't change (they don't, inside a
+        single ``_run_mcmc``), JAX hits the cached trace on every
+        iteration. The prior is applied inside the trace via
+        :meth:`_ln_prior_jax`, which propagates ``-inf`` cleanly through
+        the sum so out-of-bounds proposals are rejected without an
+        explicit Python short-circuit."""
 
         free_keys = rotationmap._free_parameter_keys(params)
         static_params = {k: v for k, v in params.items()
                          if k not in free_keys}
 
-        @jax.jit
-        def jit_lnL(theta):
+        def single_ln_prob(theta):
             full = dict(static_params)
             for i, k in enumerate(free_keys):
                 full[k] = theta[i]
-            return self._ln_likelihood(full)
+            return self._ln_prior_jax(full) + self._ln_likelihood(full)
 
-        def fast_ln_probability(theta, *params_in):
-            # Prior on the numpy/Python side: cheap, and lets us
-            # short-circuit -inf without entering the trace.
-            populated = rotationmap._populate_dictionary(theta, params_in[0])
-            lnp = self._ln_prior(populated)
-            if not np.isfinite(lnp):
-                return -np.inf
-            return float(lnp) + float(jit_lnL(jnp.asarray(theta)))
+        jit_lnP_batch = jax.jit(jax.vmap(single_ln_prob))
 
-        return fast_ln_probability
+        def vectorized_ln_probability(coords, *_params_in):
+            return np.asarray(jit_lnP_batch(jnp.asarray(coords)))
+
+        return vectorized_ln_probability
 
     def _run_nuts(self, p0, params, num_chains, num_warmup, num_samples,
                   **kwargs):
