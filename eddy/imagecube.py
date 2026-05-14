@@ -368,7 +368,7 @@ class imagecube(object):
 
         # Apply the inclination convention to be consistent with orbits.
 
-        inc = inc if inc < 90.0 else inc - 180.0
+        inc = jnp.where(inc < 90.0, inc, inc - 180.0)
 
         # Dispatch by branch. The non-shadowed paths use module-level
         # JAX-traceable helpers; the shadowed branch stays on numpy because
