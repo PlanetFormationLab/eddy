@@ -149,3 +149,189 @@ class momentmap(imagecube):
         return Annulus2D(vobs=vobs, pvals=pvals, rvals=rvals, xsky=xsky,
                          ysky=ysky, jidx=jidx, iidx=iidx, inc=inc,
                          verror=verror, **annulus_kwargs)
+
+    # -- STRUCTURE FUNCTION -- #
+
+    def compute_structure_function(self, x0=0.0, y0=0.0, inc=0.0, PA=0.0,
+                                   z0=None, psi=None, r_taper=None,
+                                   q_taper=1.0, r_cavity=0.0, z_func=None,
+                                   shadowed=False, rgrid=None, tgrid=None,
+                                   griddata_kwargs=None,
+                                   max_lag_r=None, max_lag_phi=None,
+                                   ref_r=None, ref_band=0.0,
+                                   n_bins=50, log_spaced=False):
+        """Compute the 2D second-order structure function of this map on
+        a polar (r, phi)-deprojected grid.
+
+        The map is deprojected via :meth:`imagecube.polar_deprojection`
+        (so all of the standard geometry kwargs apply), and the resulting
+        regular grid is fed to the numba kernel in
+        :mod:`eddy.structurefunction`. The result is a
+        :class:`~eddy.structurefunction.StructureFunction2D` whose two
+        lag axes are radial separation in [arcsec] and azimuthal
+        separation in [deg].
+
+        Args:
+            x0, y0 (Optional[float]): Source offsets [arcsec].
+            inc, PA (Optional[float]): Source inclination / position
+                angle [deg]. See :meth:`imagecube.disk_coords` for the
+                sign convention.
+            z0, psi, r_taper, q_taper, r_cavity, z_func, shadowed:
+                Forwarded to :meth:`imagecube.polar_deprojection` to
+                define the emission surface.
+            rgrid, tgrid (Optional[ndarray]): Radial grid in [arcsec]
+                and azimuthal grid in [rad]. Defaults to the
+                :meth:`imagecube.polar_deprojection` defaults.
+            griddata_kwargs (Optional[dict]): Forwarded to
+                ``scipy.interpolate.griddata`` inside the deprojection.
+            max_lag_r (Optional[float]): Maximum radial lag [arcsec].
+                Defaults to half the radial span of ``rgrid``.
+            max_lag_phi (Optional[float]): Maximum azimuthal lag [deg].
+                Defaults to half the azimuthal span of ``tgrid``.
+            ref_r (Optional[float]): Reference annulus radius [arcsec].
+                If provided, restricts base rows of the structure
+                function to a band of half-width ``ref_band`` around
+                this radius. If ``None``, averages globally.
+            ref_band (float): Half-width of the reference annulus
+                [arcsec]. ``0`` selects a single radial bin.
+            n_bins (int): Number of radial bins for the azimuthal
+                average.
+            log_spaced (bool): If ``True``, log-spaced radial bins.
+
+        Returns:
+            :class:`~eddy.structurefunction.StructureFunction2D`
+        """
+        rgrid_out, tgrid_out, gridded, dr, dphi_deg = (
+            self._structure_function_polar_grid(
+                x0=x0, y0=y0, inc=inc, PA=PA,
+                z0=z0, psi=psi, r_taper=r_taper, q_taper=q_taper,
+                r_cavity=r_cavity, z_func=z_func, shadowed=shadowed,
+                rgrid=rgrid, tgrid=tgrid, griddata_kwargs=griddata_kwargs,
+            )
+        )
+        return self._structure_function_from_grid(
+            rgrid_out, tgrid_out, gridded, dr, dphi_deg,
+            max_lag_r=max_lag_r, max_lag_phi=max_lag_phi,
+            ref_r=ref_r, ref_band=ref_band,
+            n_bins=n_bins, log_spaced=log_spaced,
+        )
+
+    def compute_structure_function_stack(self, ref_rs, ref_band=0.0,
+                                         x0=0.0, y0=0.0, inc=0.0, PA=0.0,
+                                         z0=None, psi=None, r_taper=None,
+                                         q_taper=1.0, r_cavity=0.0,
+                                         z_func=None, shadowed=False,
+                                         rgrid=None, tgrid=None,
+                                         griddata_kwargs=None,
+                                         max_lag_r=None, max_lag_phi=None,
+                                         n_bins=50, log_spaced=False):
+        """Compute the structure function at a sequence of reference radii.
+
+        The polar deprojection is performed once and shared across all
+        ``ref_r`` values; only the (much cheaper) kernel call runs N
+        times. This is the natural workflow for radius-resolved spiral
+        / turbulence amplitude analyses.
+
+        Args:
+            ref_rs (sequence of float): Reference annulus radii [arcsec].
+            ref_band (float): Half-width of each reference annulus
+                [arcsec]. Shared across all radii.
+            All other kwargs match :meth:`compute_structure_function`.
+
+        Returns:
+            :class:`~eddy.structurefunction.StructureFunction2DStack`
+        """
+        from .structurefunction import StructureFunction2DStack
+
+        ref_rs = np.asarray(ref_rs, dtype=float)
+        if ref_rs.ndim != 1 or ref_rs.size == 0:
+            raise ValueError("ref_rs must be a non-empty 1D sequence.")
+
+        rgrid_out, tgrid_out, gridded, dr, dphi_deg = (
+            self._structure_function_polar_grid(
+                x0=x0, y0=y0, inc=inc, PA=PA,
+                z0=z0, psi=psi, r_taper=r_taper, q_taper=q_taper,
+                r_cavity=r_cavity, z_func=z_func, shadowed=shadowed,
+                rgrid=rgrid, tgrid=tgrid, griddata_kwargs=griddata_kwargs,
+            )
+        )
+
+        results = [
+            self._structure_function_from_grid(
+                rgrid_out, tgrid_out, gridded, dr, dphi_deg,
+                max_lag_r=max_lag_r, max_lag_phi=max_lag_phi,
+                ref_r=float(r0), ref_band=ref_band,
+                n_bins=n_bins, log_spaced=log_spaced,
+            )
+            for r0 in ref_rs
+        ]
+        return StructureFunction2DStack(
+            ref_rs=ref_rs, ref_band=float(ref_band), results=results,
+            x_grid=rgrid_out, y_grid=tgrid_out, gridded=gridded,
+        )
+
+    # -- STRUCTURE FUNCTION INTERNALS -- #
+
+    def _structure_function_polar_grid(self, x0=0.0, y0=0.0, inc=0.0,
+                                       PA=0.0, z0=None, psi=None,
+                                       r_taper=None, q_taper=1.0,
+                                       r_cavity=0.0, z_func=None,
+                                       shadowed=False, rgrid=None,
+                                       tgrid=None, griddata_kwargs=None):
+        """Deproject ``self.data`` onto a polar grid for structure-function
+        analysis. Returns ``(rgrid, tgrid, gridded, dr, dphi_deg)`` where
+        ``gridded`` is shaped ``(N_r, N_phi)`` — radius is axis 0 so
+        ``ref_r`` selects a base row in the kernel.
+        """
+        rgrid_out, tgrid_out, gridded = self.polar_deprojection(
+            self.data, x0=x0, y0=y0, inc=inc, PA=PA,
+            z0=z0, psi=psi, r_taper=r_taper, q_taper=q_taper,
+            r_cavity=r_cavity, z_func=z_func, shadowed=shadowed,
+            rgrid=rgrid, tgrid=tgrid, griddata_kwargs=griddata_kwargs,
+        )
+        gridded = np.asarray(gridded).T
+        dr = float(np.mean(np.diff(rgrid_out)))
+        dphi_deg = float(np.degrees(np.mean(np.diff(tgrid_out))))
+        return rgrid_out, tgrid_out, gridded, dr, dphi_deg
+
+    @staticmethod
+    def _structure_function_from_grid(rgrid_out, tgrid_out, gridded,
+                                      dr, dphi_deg, max_lag_r, max_lag_phi,
+                                      ref_r, ref_band, n_bins, log_spaced):
+        """Run the structure-function kernel on an already-deprojected
+        polar grid and build a :class:`StructureFunction2D`.
+        """
+        from .structurefunction import (
+            StructureFunction2D, compute_s2, extract_basic_profiles,
+        )
+
+        max_lag_x = (None if max_lag_r is None
+                     else max(1, int(round(max_lag_r / dr))))
+        max_lag_y = (None if max_lag_phi is None
+                     else max(1, int(round(max_lag_phi / dphi_deg))))
+
+        if ref_r is None:
+            ref_i_idx = -1
+        else:
+            ref_i_idx = int(np.argmin(np.abs(rgrid_out - ref_r)))
+        ref_band_idx = int(round(ref_band / dr)) if ref_band > 0 else 0
+
+        S2, counts, mlx, mly = compute_s2(
+            gridded, max_lag_x=max_lag_x, max_lag_y=max_lag_y,
+            ref_i=ref_i_idx, ref_band=ref_band_idx,
+        )
+        lags_x, lags_y, lags_i, S2_x, S2_y, S2_i = extract_basic_profiles(
+            S2, mlx, mly, dx=dr, dy=dphi_deg,
+            n_bins=n_bins, log_spaced=log_spaced,
+        )
+        return StructureFunction2D(
+            S2=S2, counts=counts, dx=dr, dy=dphi_deg,
+            lags_x=lags_x, lags_y=lags_y, lags_i=lags_i,
+            S2_x=S2_x, S2_y=S2_y, S2_i=S2_i,
+            x_grid=rgrid_out, y_grid=tgrid_out, gridded=gridded,
+            ref=(None if ref_r is None else float(rgrid_out[ref_i_idx])),
+            ref_band=(ref_band_idx * dr if ref_band_idx else 0.0),
+            x_label="radial lag [arcsec]",
+            y_label="azimuthal lag [deg]",
+            azimuthal_axis="y",
+        )

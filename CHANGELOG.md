@@ -5,6 +5,49 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] – 2026-05-18
+
+### Added
+- **Structure function analysis.** New `eddy.structurefunction` module
+  with a numba-jitted 2D second-order structure function kernel,
+  helpers for lag coordinates, axis/azimuthal profile extraction, and
+  pair-count weighted combination across realizations. The 1D
+  azimuthal spiral model (`S2phi`, with `m=1,2,3` modes) is included.
+- **`StructureFunction2D` result class** holding the 2D `S_2` surface,
+  pair counts, 1D profiles, and the underlying polar grid, plus
+  `.combine(...)`, `.fit_spiral(modes=...)`, `.plot_2d()`, and
+  `.plot_profiles()` helpers. Surfaced at the top level
+  (`from eddy import StructureFunction2D`).
+- **`momentmap.compute_structure_function(...)`** — applies the
+  structure function to the map after a polar deprojection through
+  `imagecube.polar_deprojection`. Inherited by `rotationmap`, so
+  residual maps from `fit_map` flow through the same entry point.
+- **`momentmap.compute_structure_function_stack(ref_rs, ref_band, ...)`**
+  — sweeps a sequence of reference radii on a single deprojection,
+  returning a `StructureFunction2DStack`. This is the natural workflow
+  for radius-resolved spiral and turbulence-amplitude analyses; the
+  deprojection cost is paid once and only the kernel runs per radius.
+- **`StructureFunction2DStack` container** — list-like over per-radius
+  `StructureFunction2D` results, with stacked array properties
+  (`S2_stack`, `S2_x_stack`, `S2_y_stack`, `S2_i_stack`), a batched
+  `.fit_spiral(modes=...)` returning `(popt, perr)` of shape
+  `(N_ref, 1 + len(modes))`, and `.plot_azimuthal_heatmap()` for the
+  ref_r vs azimuthal-lag visualization. Surfaced at the top level
+  (`from eddy import StructureFunction2DStack`).
+- **`structurefunction` optional dependency** — install numba via
+  `pip install astro-eddy[structurefunction]`. `import eddy` works
+  without numba; only the structure-function entry points raise.
+- **Tests.** New `tests/test_structurefunction.py` (12 cases) covering
+  analytic recovery, NaN handling, reference-annulus mode, the
+  result-class combine/fit-spiral helpers, the radius-sweep stack
+  (including single-element-stack equivalence with a direct call),
+  and end-to-end smoke tests through `momentmap.compute_structure_function`
+  and `compute_structure_function_stack`.
+
+### Fixed
+- `pyproject.toml` version had drifted from `eddy.__version__`; both
+  now report `3.1.0`.
+
 ## [3.0.0] – 2026-05-13
 
 A major refactor centred on a JAX-backed model, a new class hierarchy,

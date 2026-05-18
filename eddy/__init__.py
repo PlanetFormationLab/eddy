@@ -8,13 +8,14 @@
 import jax
 jax.config.update('jax_enable_x64', True)
 
-__version__ = "3.0.1"
+__version__ = "3.1.0"
 
 from .imagecube import imagecube
 from .momentmap import momentmap
 from .rotationmap import rotationmap
 from .linecube import linecube
 from .annulus import annulus, Annulus, Annulus2D, Annulus3D
+from .structurefunction import StructureFunction2D, StructureFunction2DStack
 
 __all__ = [
     "__version__",
@@ -26,4 +27,6 @@ __all__ = [
     "Annulus",
     "Annulus2D",
     "Annulus3D",
+    "StructureFunction2D",
+    "StructureFunction2DStack",
 ]
