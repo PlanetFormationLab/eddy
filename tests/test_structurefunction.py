@@ -88,23 +88,76 @@ def test_compute_s2_nan_handling():
 
 
 def test_compute_s2_reference_band():
-    """With ``ref_i`` set and ``ref_band=0`` the base rows are pinned
-    to a single index, matching a manual loop over that row only."""
+    """With ``ref_i`` set, ``ref_band=0`` and ``symmetrize=False`` the
+    base rows are pinned to a single index. The positive-``l_r`` half
+    is the outward statistic and the negative-``l_r`` half is the
+    inward statistic; each should match a manual loop in its own
+    direction."""
     rng = np.random.default_rng(2)
     f = rng.standard_normal((20, 18))
     mlx, mly = 5, 5
     S2, counts, _, _ = compute_s2(f, max_lag_x=mlx, max_lag_y=mly,
-                                  ref_i=10, ref_band=0)
+                                  ref_i=10, ref_band=0, symmetrize=False)
 
-    # Manual reference at (di=2, dj=3) using only base row i=10.
-    di, dj = 2, 3
     N, M = f.shape
+    # Outward: base row 10, partner row 12.
+    di, dj = 2, 3
     j_lo, j_hi = max(0, -dj), min(M, M - dj)
     a = f[10, j_lo:j_hi]
     b = f[10 + di, j_lo + dj:j_hi + dj]
-    ref = float(np.mean((b - a) ** 2))
-    np.testing.assert_allclose(S2[mlx + di, mly + dj], ref)
+    ref_out = float(np.mean((b - a) ** 2))
+    np.testing.assert_allclose(S2[mlx + di, mly + dj], ref_out)
     assert counts[mlx + di, mly + dj] == j_hi - j_lo
+
+    # Inward: base row 10, partner row 8 (same dj).
+    a = f[10, j_lo:j_hi]
+    b = f[10 - di, j_lo + dj:j_hi + dj]
+    ref_in = float(np.mean((b - a) ** 2))
+    np.testing.assert_allclose(S2[mlx - di, mly + dj], ref_in)
+    assert counts[mlx - di, mly + dj] == j_hi - j_lo
+
+
+def test_compute_s2_symmetrize_averages_inward_outward():
+    """``symmetrize=True`` collapses the outward and inward halves into
+    a pair-count-weighted average. With equal counts (interior ref_i)
+    that's the simple mean of the two manual statistics."""
+    rng = np.random.default_rng(3)
+    f = rng.standard_normal((20, 18))
+    mlx, mly = 5, 5
+
+    S2_raw, _, _, _ = compute_s2(f, max_lag_x=mlx, max_lag_y=mly,
+                                 ref_i=10, ref_band=0, symmetrize=False)
+    S2_sym, counts_sym, _, _ = compute_s2(f, max_lag_x=mlx, max_lag_y=mly,
+                                          ref_i=10, ref_band=0,
+                                          symmetrize=True)
+
+    di, dj = 2, 3
+    expected = 0.5 * (S2_raw[mlx + di, mly + dj] + S2_raw[mlx - di, mly - dj])
+    np.testing.assert_allclose(S2_sym[mlx + di, mly + dj], expected)
+    # Symmetrized array equals its (-l_r, -l_y) flip by construction.
+    np.testing.assert_allclose(S2_sym, S2_sym[::-1, ::-1])
+    # Counts are summed.
+    assert counts_sym[mlx + di, mly + dj] == (
+        counts_sym[mlx - di, mly - dj]
+    )
+
+
+def test_compute_s2_reference_band_near_edge():
+    """For a ``ref_i`` near the outer edge the outward direction has
+    very few valid lags but the inward direction has many — exactly
+    the case the previous mirror-only kernel could not handle."""
+    rng = np.random.default_rng(4)
+    N, M = 20, 18
+    f = rng.standard_normal((N, M))
+    mlx, mly = 8, 3
+    S2, counts, _, _ = compute_s2(f, max_lag_x=mlx, max_lag_y=mly,
+                                  ref_i=N - 2, ref_band=0,
+                                  symmetrize=False)
+    # Outward from ref_i=N-2=18: only di=0, 1 reach inside the grid.
+    assert counts[mlx + 5, mly] == 0   # not reachable outward
+    # Inward is fine: di = -7 leaves partner at row 11 in [0, N).
+    assert counts[mlx - 7, mly] > 0
+    assert np.isfinite(S2[mlx - 7, mly])
 
 
 def test_extract_basic_profiles_shapes():

@@ -159,7 +159,8 @@ class momentmap(imagecube):
                                    griddata_kwargs=None,
                                    max_lag_r=None, max_lag_phi=None,
                                    ref_r=None, ref_band=0.0,
-                                   n_bins=50, log_spaced=False):
+                                   n_bins=50, log_spaced=False,
+                                   symmetrize=True):
         """Compute the 2D second-order structure function of this map on
         a polar (r, phi)-deprojected grid.
 
@@ -197,6 +198,13 @@ class momentmap(imagecube):
             n_bins (int): Number of radial bins for the azimuthal
                 average.
             log_spaced (bool): If ``True``, log-spaced radial bins.
+            symmetrize (bool): Only relevant when ``ref_r`` is set. If
+                ``True`` (default), the outward (``+l_r``) and inward
+                (``-l_r``) halves of the radial-lag axis are combined
+                by a pair-count-weighted average — i.e. ``S_2`` becomes
+                a direction-agnostic estimator. If ``False``, both
+                halves are returned untouched, so the user can inspect
+                the inward / outward asymmetry directly.
 
         Returns:
             :class:`~eddy.structurefunction.StructureFunction2D`
@@ -214,6 +222,7 @@ class momentmap(imagecube):
             max_lag_r=max_lag_r, max_lag_phi=max_lag_phi,
             ref_r=ref_r, ref_band=ref_band,
             n_bins=n_bins, log_spaced=log_spaced,
+            symmetrize=symmetrize,
         )
 
     def compute_structure_function_stack(self, ref_rs, ref_band=0.0,
@@ -224,7 +233,8 @@ class momentmap(imagecube):
                                          rgrid=None, tgrid=None,
                                          griddata_kwargs=None,
                                          max_lag_r=None, max_lag_phi=None,
-                                         n_bins=50, log_spaced=False):
+                                         n_bins=50, log_spaced=False,
+                                         symmetrize=True):
         """Compute the structure function at a sequence of reference radii.
 
         The polar deprojection is performed once and shared across all
@@ -262,6 +272,7 @@ class momentmap(imagecube):
                 max_lag_r=max_lag_r, max_lag_phi=max_lag_phi,
                 ref_r=float(r0), ref_band=ref_band,
                 n_bins=n_bins, log_spaced=log_spaced,
+                symmetrize=symmetrize,
             )
             for r0 in ref_rs
         ]
@@ -297,7 +308,8 @@ class momentmap(imagecube):
     @staticmethod
     def _structure_function_from_grid(rgrid_out, tgrid_out, gridded,
                                       dr, dphi_deg, max_lag_r, max_lag_phi,
-                                      ref_r, ref_band, n_bins, log_spaced):
+                                      ref_r, ref_band, n_bins, log_spaced,
+                                      symmetrize=True):
         """Run the structure-function kernel on an already-deprojected
         polar grid and build a :class:`StructureFunction2D`.
         """
@@ -319,11 +331,16 @@ class momentmap(imagecube):
         S2, counts, mlx, mly = compute_s2(
             gridded, max_lag_x=max_lag_x, max_lag_y=max_lag_y,
             ref_i=ref_i_idx, ref_band=ref_band_idx,
+            symmetrize=symmetrize,
         )
         lags_x, lags_y, lags_i, S2_x, S2_y, S2_i = extract_basic_profiles(
             S2, mlx, mly, dx=dr, dy=dphi_deg,
             n_bins=n_bins, log_spaced=log_spaced,
         )
+        # Symmetric whenever there is no reference annulus (kernel
+        # already symmetric) or the user asked for the symmetrize
+        # post-process.
+        symmetrized = (ref_i_idx < 0) or bool(symmetrize)
         return StructureFunction2D(
             S2=S2, counts=counts, dx=dr, dy=dphi_deg,
             lags_x=lags_x, lags_y=lags_y, lags_i=lags_i,
@@ -334,4 +351,5 @@ class momentmap(imagecube):
             x_label="radial lag [arcsec]",
             y_label="azimuthal lag [deg]",
             azimuthal_axis="y",
+            symmetrized=symmetrized,
         )

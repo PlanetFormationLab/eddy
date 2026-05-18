@@ -71,8 +71,21 @@ if _HAS_NUMBA:
         NaN values in ``f`` are excluded from both the sum and the pair
         count, so the average is always over finite pairs.
 
-        ``S_2(-l_x, -l_y) = S_2(l_x, l_y)`` is exploited: only
-        ``l_x >= 0`` is computed and the conjugate half is mirror-filled.
+        Two code paths:
+
+        * **Global mode** (``ref_i < 0``): the base index ranges over the
+          whole grid, so ``S_2`` has full ``(l_x, l_y) -> (-l_x, -l_y)``
+          symmetry; the kernel iterates ``l_x >= 0`` and mirror-fills the
+          conjugate half.
+        * **Reference-annulus mode** (``ref_i >= 0``): the base row is
+          pinned at ``ref_i``, so ``S_2(+l_r)`` (outward pairs) and
+          ``S_2(-l_r)`` (inward pairs) are *different* physical
+          statistics. Both signs of ``l_x`` are iterated explicitly; only
+          the azimuthal mirror is applied (phi-translation symmetry
+          survives the radial pin). To collapse the two halves into a
+          single direction-agnostic estimator, post-process with
+          :func:`_symmetrize_s2` (see the ``symmetrize`` kwarg on
+          :func:`compute_s2`).
         """
         N, M = f.shape
 
@@ -90,44 +103,76 @@ if _HAS_NUMBA:
             if ref_lo >= ref_hi:
                 use_ref = False
 
-        for di in prange(0, max_lag_x + 1):
-            dj_start = 0 if di == 0 else -max_lag_y
-
-            for dj in range(dj_start, max_lag_y + 1):
-
-                if use_ref:
-                    i_min = ref_lo
+        if use_ref:
+            # Iterate both signs of di because the radial direction
+            # loses translation symmetry under the reference-annulus
+            # pin. dj still has phi-translation symmetry, so iterate
+            # dj >= 0 only and mirror.
+            for idx in prange(2 * max_lag_x + 1):
+                di = idx - max_lag_x
+                for dj in range(0, max_lag_y + 1):
+                    # i in [ref_lo, ref_hi); i + di must also be in [0, N).
+                    i_min = max(ref_lo, -di)
                     i_max = min(ref_hi, N - di)
                     if i_min >= i_max:
                         continue
-                else:
+                    # dj >= 0 in this branch (phi-mirror covers dj < 0).
+                    j_min = 0
+                    j_max = M - dj
+
+                    acc = 0.0
+                    cnt = 0
+                    for i in range(i_min, i_max):
+                        for j in range(j_min, j_max):
+                            fi = f[i, j]
+                            fid = f[i + di, j + dj]
+                            if np.isnan(fi) or np.isnan(fid):
+                                continue
+                            diff = fid - fi
+                            acc += diff * diff
+                            cnt += 1
+
+                    val = acc / cnt if cnt > 0 else 0.0
+                    li = idx
+                    lj = dj + max_lag_y
+                    S2[li, lj] = val
+                    counts[li, lj] = cnt
+
+                    if dj != 0:
+                        S2[li, -dj + max_lag_y] = val
+                        counts[li, -dj + max_lag_y] = cnt
+        else:
+            for di in prange(0, max_lag_x + 1):
+                dj_start = 0 if di == 0 else -max_lag_y
+
+                for dj in range(dj_start, max_lag_y + 1):
+
                     i_min = 0
                     i_max = N - di
+                    j_min = max(0, -dj)
+                    j_max = min(M, M - dj)
 
-                j_min = max(0, -dj)
-                j_max = min(M, M - dj)
+                    acc = 0.0
+                    cnt = 0
+                    for i in range(i_min, i_max):
+                        for j in range(j_min, j_max):
+                            fi = f[i, j]
+                            fid = f[i + di, j + dj]
+                            if np.isnan(fi) or np.isnan(fid):
+                                continue
+                            diff = fid - fi
+                            acc += diff * diff
+                            cnt += 1
 
-                acc = 0.0
-                cnt = 0
-                for i in range(i_min, i_max):
-                    for j in range(j_min, j_max):
-                        fi = f[i, j]
-                        fid = f[i + di, j + dj]
-                        if np.isnan(fi) or np.isnan(fid):
-                            continue
-                        diff = fid - fi
-                        acc += diff * diff
-                        cnt += 1
+                    val = acc / cnt if cnt > 0 else 0.0
+                    li = di + max_lag_x
+                    lj = dj + max_lag_y
+                    S2[li, lj] = val
+                    counts[li, lj] = cnt
 
-                val = acc / cnt if cnt > 0 else 0.0
-                li = di + max_lag_x
-                lj = dj + max_lag_y
-                S2[li, lj] = val
-                counts[li, lj] = cnt
-
-                if di != 0 or dj != 0:
-                    S2[-di + max_lag_x, -dj + max_lag_y] = val
-                    counts[-di + max_lag_x, -dj + max_lag_y] = cnt
+                    if di != 0 or dj != 0:
+                        S2[-di + max_lag_x, -dj + max_lag_y] = val
+                        counts[-di + max_lag_x, -dj + max_lag_y] = cnt
 
         return S2, counts
 
@@ -137,7 +182,24 @@ else:  # pragma: no cover
         _require_numba()
 
 
-def compute_s2(f, max_lag_x=None, max_lag_y=None, ref_i=-1, ref_band=0):
+def _symmetrize_s2(S2, counts):
+    """Pair-count-weighted average of ``S_2`` with its ``(-l_x, -l_y)`` conjugate.
+
+    In reference-annulus mode the kernel returns a genuinely two-sided
+    ``S_2``: ``S_2(+l_r)`` is the outward statistic (base pixel at
+    ``ref_i``, partner at ``ref_i + l_r``) and ``S_2(-l_r)`` is the
+    inward statistic. Averaging the two weighted by their pair counts
+    collapses them into a single direction-agnostic estimator.
+    """
+    counts_flip = counts[::-1, ::-1]
+    total = counts + counts_flip
+    weighted = S2 * counts + S2[::-1, ::-1] * counts_flip
+    S2_sym = np.where(total > 0, weighted / np.maximum(total, 1), 0.0)
+    return S2_sym, total
+
+
+def compute_s2(f, max_lag_x=None, max_lag_y=None, ref_i=-1, ref_band=0,
+               symmetrize=True):
     """Compute the 2D second-order structure function on a regular grid.
 
     Args:
@@ -153,13 +215,21 @@ def compute_s2(f, max_lag_x=None, max_lag_y=None, ref_i=-1, ref_band=0):
             ref_i + ref_band]``.
         ref_band (int): Half-width in rows of the reference annulus.
             ``0`` selects a single row.
+        symmetrize (bool): Only relevant when ``ref_i >= 0``. If
+            ``True`` (default), the outward (``+l_r``) and inward
+            (``-l_r``) halves are combined by a pair-count-weighted
+            average — i.e. ``S_2`` becomes a direction-agnostic
+            estimator. If ``False``, both halves are returned
+            untouched, so the user can inspect the inward / outward
+            asymmetry. Ignored in global mode (``ref_i < 0``), where
+            ``S_2`` is already symmetric by construction.
 
     Returns:
         S2 (ndarray): Structure function with shape
             ``(2*max_lag_x+1, 2*max_lag_y+1)``. Zero lag is at index
             ``[max_lag_x, max_lag_y]``.
         counts (ndarray): Number of finite pairs contributing to each
-            lag bin.
+            lag bin (or the sum thereof when ``symmetrize=True``).
         max_lag_x (int): The resolved value of ``max_lag_x``.
         max_lag_y (int): The resolved value of ``max_lag_y``.
     """
@@ -172,6 +242,8 @@ def compute_s2(f, max_lag_x=None, max_lag_y=None, ref_i=-1, ref_band=0):
         max_lag_y = M // 2
     S2, counts = _s2_kernel(f, int(max_lag_x), int(max_lag_y),
                             int(ref_i), int(ref_band))
+    if symmetrize and ref_i >= 0:
+        S2, counts = _symmetrize_s2(S2, counts)
     return S2, counts, max_lag_x, max_lag_y
 
 
@@ -362,7 +434,8 @@ class StructureFunction2D:
     def __init__(self, *, S2, counts, dx, dy, lags_x, lags_y, lags_i,
                  S2_x, S2_y, S2_i, x_grid=None, y_grid=None,
                  gridded=None, ref=None, ref_band=None,
-                 x_label="lag_x", y_label="lag_y", azimuthal_axis=None):
+                 x_label="lag_x", y_label="lag_y", azimuthal_axis=None,
+                 symmetrized=True):
         self.S2 = np.asarray(S2)
         self.counts = np.asarray(counts)
         self.dx = float(dx)
@@ -381,6 +454,12 @@ class StructureFunction2D:
         self.x_label = x_label
         self.y_label = y_label
         self.azimuthal_axis = azimuthal_axis
+        # True for global mode and for ref-annulus mode with the
+        # symmetrize post-processing applied. False only when the user
+        # explicitly asked for the raw two-sided result. Plotting
+        # routines branch on this so the displayed lag axis matches the
+        # statistic actually computed.
+        self.symmetrized = bool(symmetrized)
 
     @property
     def max_lag_x(self):
@@ -397,10 +476,32 @@ class StructureFunction2D:
         return (-self.max_lag_y * self.dy, self.max_lag_y * self.dy,
                 -self.max_lag_x * self.dx, self.max_lag_x * self.dx)
 
+    @property
+    def lags_x_full(self):
+        """Two-sided radial lag axis, shape ``(2*max_lag_x+1,)``.
+
+        Useful with :attr:`S2_x_full` in ``symmetrize=False`` mode,
+        where the negative-lag half is the inward statistic and is
+        physically distinct from the outward (positive-lag) half.
+        """
+        return np.arange(-self.max_lag_x, self.max_lag_x + 1) * self.dx
+
+    @property
+    def S2_x_full(self):
+        """Full two-sided radial slice ``S_2[:, center_y]``, shape
+        ``(2*max_lag_x+1,)``.
+
+        With ``symmetrize=True`` (default) or in global mode this is
+        symmetric about ``l_r = 0``. With ``symmetrize=False`` and a
+        reference annulus, the positive-lag half is the outward
+        statistic and the negative-lag half is the inward statistic.
+        """
+        return self.S2[:, self.max_lag_y]
+
     @classmethod
     def from_array(cls, f, dx=1.0, dy=1.0, max_lag_x=None, max_lag_y=None,
                    ref_i=-1, ref_band=0, n_bins=50, log_spaced=False,
-                   **meta):
+                   symmetrize=True, **meta):
         """Compute ``S_2`` from a 2D array on a regular grid.
 
         Args:
@@ -411,6 +512,9 @@ class StructureFunction2D:
             ref_i, ref_band (int): Reference-annulus index and half-width.
             n_bins (int): Number of radial bins for the azimuthal average.
             log_spaced (bool): If ``True``, log-spaced radial bins.
+            symmetrize (bool): See :func:`compute_s2`. Recorded on the
+                result as :attr:`StructureFunction2D.symmetrized` so the
+                plotting routines can pick a sensible default lag axis.
             **meta: Forwarded to the :class:`StructureFunction2D` constructor
                 (e.g. ``x_grid``, ``y_grid``, ``gridded``, ``ref``,
                 ``ref_band``, ``x_label``, ``y_label``, ``azimuthal_axis``).
@@ -420,15 +524,18 @@ class StructureFunction2D:
         """
         S2, counts, mlx, mly = compute_s2(
             f, max_lag_x=max_lag_x, max_lag_y=max_lag_y,
-            ref_i=ref_i, ref_band=ref_band,
+            ref_i=ref_i, ref_band=ref_band, symmetrize=symmetrize,
         )
+        # In global mode the result is symmetric by construction.
+        symmetrized = bool(symmetrize) or ref_i < 0
         lags_x, lags_y, lags_i, S2_x, S2_y, S2_i = extract_basic_profiles(
             S2, mlx, mly, dx=dx, dy=dy,
             n_bins=n_bins, log_spaced=log_spaced,
         )
         return cls(S2=S2, counts=counts, dx=dx, dy=dy,
                    lags_x=lags_x, lags_y=lags_y, lags_i=lags_i,
-                   S2_x=S2_x, S2_y=S2_y, S2_i=S2_i, **meta)
+                   S2_x=S2_x, S2_y=S2_y, S2_i=S2_i,
+                   symmetrized=symmetrized, **meta)
 
     def combine(self, others, n_bins=50, log_spaced=False):
         """Combine this result with one or more others via pair-count
@@ -645,14 +752,36 @@ class StructureFunction2DStack:
         return self.results[0].lags_i
 
     @property
+    def lags_x_full(self):
+        """Two-sided radial lag axis, shape ``(2*mlx+1,)``."""
+        return self.results[0].lags_x_full
+
+    @property
+    def symmetrized(self):
+        """Whether the per-ring results were symmetrized (taken from the
+        first result; ``compute_structure_function_stack`` uses one
+        ``symmetrize`` value for the whole stack)."""
+        return self.results[0].symmetrized
+
+    @property
     def S2_stack(self):
         """Full 2D ``S_2`` surfaces, shape ``(N_ref, 2*mlx+1, 2*mly+1)``."""
         return np.stack([r.S2 for r in self.results])
 
     @property
     def S2_x_stack(self):
-        """Radial-lag slice at each ``ref_r``, shape ``(N_ref, mlx+1)``."""
+        """Outward radial-lag slice at each ``ref_r`` (``l_r >= 0`` only),
+        shape ``(N_ref, mlx+1)``. For the two-sided slice that distinguishes
+        inward from outward under ``symmetrize=False``, use
+        :attr:`S2_x_full_stack`."""
         return np.stack([r.S2_x for r in self.results])
+
+    @property
+    def S2_x_full_stack(self):
+        """Two-sided radial-lag slice at each ``ref_r``, shape
+        ``(N_ref, 2*mlx+1)``. Negative-lag half is the inward statistic
+        when ``symmetrize=False``."""
+        return np.stack([r.S2_x_full for r in self.results])
 
     @property
     def S2_y_stack(self):
@@ -690,11 +819,112 @@ class StructureFunction2DStack:
             perrs.append(perr)
         return np.asarray(popts), np.asarray(perrs)
 
+    _NORMALIZE_LABELS = {
+        None: r"$S_2$",
+        "row_max": r"$S_2 / \max_\ell(S_2)$",
+    }
+
+    @classmethod
+    def _heatmap_normalize_label(cls, normalize):
+        """Colorbar label for a given ``normalize`` choice. Raises on
+        unknown values so the plot and calculate methods fail together."""
+        if normalize not in cls._NORMALIZE_LABELS:
+            raise ValueError(
+                f"Unknown normalize={normalize!r}; expected one of "
+                f"{list(cls._NORMALIZE_LABELS)}."
+            )
+        return cls._NORMALIZE_LABELS[normalize]
+
+    @classmethod
+    def _apply_heatmap_normalize(cls, C, normalize):
+        """Apply a per-row normalization to a heatmap ``C`` of shape
+        ``(N_ref, N_lag)``. Currently supported:
+
+        * ``None`` -- no rescaling, raw ``S_2``.
+        * ``'row_max'`` -- each row divided by its (nan-safe) max. Rows
+          where the max is zero (e.g. unreachable in the bowtie
+          envelope) stay zero.
+        """
+        # Validate via the label table so calculate_* and plot_* agree.
+        cls._heatmap_normalize_label(normalize)
+        if normalize is None:
+            return C
+        if normalize == "row_max":
+            row_max = np.nanmax(C, axis=1, keepdims=True)
+            safe = np.where(row_max > 0, row_max, 1.0)
+            return np.where(row_max > 0, C / safe, 0.0)
+        # Unreachable: the validation above already raised for unknowns.
+        return C  # pragma: no cover
+
+    def calculate_azimuthal_heatmap(self, arclength=False, normalize=None):
+        """Return the ``(X, Y, C)`` arrays for the azimuthal-slice heatmap.
+
+        Args:
+            arclength (Optional[bool]): If ``True``, convert the
+                azimuthal lag to arc length ``ref_r * dphi_rad`` in
+                arcsec. Each row then has its own physical x-scale, so
+                ``X`` and ``Y`` are returned as 2D arrays matching ``C``.
+            normalize (Optional[str]): Per-row rescaling applied to
+                ``C``. See :meth:`_apply_heatmap_normalize` for the
+                supported values. Default ``None`` (raw ``S_2``).
+
+        Returns:
+            X (ndarray): Azimuthal lag axis. 1D ``(mly+1,)`` in degrees if
+                ``arclength=False``; 2D ``(N_ref, mly+1)`` in arcsec if
+                ``arclength=True``.
+            Y (ndarray): Reference-radius axis. 1D ``(N_ref,)`` if
+                ``arclength=False``; 2D ``(N_ref, mly+1)`` if
+                ``arclength=True``.
+            C (ndarray): ``S2_y_stack`` (possibly rescaled), shape
+                ``(N_ref, mly+1)``.
+        """
+        C = self._apply_heatmap_normalize(self.S2_y_stack, normalize)
+        if arclength:
+            X = self.ref_rs[:, None] * np.radians(self.lags_y)[None, :]
+            Y = np.broadcast_to(self.ref_rs[:, None], X.shape)
+            return X, Y, C
+        return self.lags_y, self.ref_rs, C
+
+    def calculate_radial_heatmap(self, two_sided=None, normalize=None):
+        """Return the ``(X, Y, C)`` arrays for the radial-slice heatmap.
+
+        Args:
+            two_sided (Optional[bool]): If ``None`` (default), pick
+                based on :attr:`symmetrized` — positive-only when the
+                result is symmetric (the negative half would just
+                mirror), two-sided when it isn't (so the inward /
+                outward asymmetry from ``symmetrize=False`` is visible).
+                Override explicitly to force one shape or the other.
+            normalize (Optional[str]): Per-row rescaling applied to
+                ``C``. See :meth:`_apply_heatmap_normalize`.
+
+        Returns:
+            X (ndarray): Radial lag axis in arcsec — 1D ``(2*mlx+1,)``
+                if ``two_sided``, else ``(mlx+1,)``.
+            Y (ndarray): ``ref_rs``, 1D ``(N_ref,)`` in arcsec.
+            C (ndarray): The radial-slice stack (possibly rescaled),
+                shape ``(N_ref, len(X))``.
+        """
+        if two_sided is None:
+            two_sided = not self.symmetrized
+        raw = self.S2_x_full_stack if two_sided else self.S2_x_stack
+        C = self._apply_heatmap_normalize(raw, normalize)
+        X = self.lags_x_full if two_sided else self.lags_x
+        return X, self.ref_rs, C
+
     def plot_azimuthal_heatmap(self, ax=None, return_fig=False,
+                               arclength=False, normalize=None,
                                **pcolormesh_kwargs):
         """Heatmap of ``S_2_y`` vs ``(ref_r, dphi)`` — the canonical
-        figure for radius-resolved spiral analysis. Uses ``pcolormesh``
-        so non-uniform ``ref_rs`` (e.g. log-spaced) render correctly.
+        figure for radius-resolved spiral analysis. Thin wrapper around
+        :meth:`calculate_azimuthal_heatmap`.
+
+        Args:
+            arclength (Optional[bool]): See
+                :meth:`calculate_azimuthal_heatmap`.
+            normalize (Optional[str]): See
+                :meth:`calculate_azimuthal_heatmap`. Also sets the
+                colorbar label.
         """
         import matplotlib.pyplot as plt
 
@@ -703,11 +933,109 @@ class StructureFunction2DStack:
         else:
             fig = ax.figure
 
+        X, Y, C = self.calculate_azimuthal_heatmap(arclength=arclength,
+                                                   normalize=normalize)
+
         kwargs = dict(shading="auto")
         kwargs.update(pcolormesh_kwargs)
-        pcm = ax.pcolormesh(self.lags_y, self.ref_rs, self.S2_y_stack,
-                            **kwargs)
-        ax.set_xlabel("azimuthal lag [deg]")
+        pcm = ax.pcolormesh(X, Y, C, **kwargs)
+        ax.set_xlabel("azimuthal arc length [arcsec]" if arclength
+                      else "azimuthal lag [deg]")
         ax.set_ylabel("reference radius [arcsec]")
-        fig.colorbar(pcm, ax=ax, label=r"$S_2$")
+        fig.colorbar(pcm, ax=ax,
+                     label=self._heatmap_normalize_label(normalize))
+        return fig if return_fig else None
+
+    def plot_radial_heatmap(self, ax=None, return_fig=False,
+                            two_sided=None, normalize=None,
+                            **pcolormesh_kwargs):
+        """Heatmap of ``S_2_x`` vs ``(ref_r, radial_lag)``. Thin wrapper
+        around :meth:`calculate_radial_heatmap`. Each row is the radial-
+        lag slice (``ell_phi = 0``) at one reference radius.
+
+        Args:
+            two_sided (Optional[bool]): See
+                :meth:`calculate_radial_heatmap`. ``None`` (default)
+                picks positive-only for symmetric results and two-sided
+                otherwise.
+            normalize (Optional[str]): See
+                :meth:`calculate_radial_heatmap`. Also sets the colorbar
+                label.
+        """
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure
+
+        X, Y, C = self.calculate_radial_heatmap(two_sided=two_sided,
+                                                normalize=normalize)
+
+        kwargs = dict(shading="auto")
+        kwargs.update(pcolormesh_kwargs)
+        pcm = ax.pcolormesh(X, Y, C, **kwargs)
+        ax.set_xlabel("radial lag [arcsec]")
+        ax.set_ylabel("reference radius [arcsec]")
+        fig.colorbar(pcm, ax=ax,
+                     label=self._heatmap_normalize_label(normalize))
+        return fig if return_fig else None
+
+    def plot_gridded(self, ax=None, return_fig=False,
+                     azimuth_in_degrees=True, show_rings=False,
+                     ring_kwargs=None, **pcolormesh_kwargs):
+        """Plot the polar-deprojected field that the stack was computed from.
+
+        Useful as a sanity-check companion to the heatmaps: lets you see
+        whether the structure picked up at a given ``ref_r`` corresponds
+        to a visible feature in the source data.
+
+        Args:
+            ax (Optional): Matplotlib ``Axes`` to draw into.
+            return_fig (Optional[bool]): Return the figure.
+            azimuth_in_degrees (Optional[bool]): Convert the azimuth axis
+                from radians (the ``polar_deprojection`` convention) to
+                degrees for display. Default ``True``.
+            show_rings (Optional[bool]): Overlay the reference annuli
+                from :attr:`ref_rs` as horizontal lines.
+            ring_kwargs (Optional[dict]): Kwargs for the ring overlay
+                (forwarded to ``ax.axhline``). Defaults to a thin white
+                semi-transparent line.
+            **pcolormesh_kwargs: Forwarded to ``ax.pcolormesh``.
+
+        Raises:
+            ValueError: If ``self.gridded`` was not stored on the stack
+                (e.g. constructed without the polar grid).
+        """
+        if self.gridded is None or self.x_grid is None or self.y_grid is None:
+            raise ValueError(
+                "plot_gridded requires gridded/x_grid/y_grid on the stack; "
+                "the stack was constructed without them."
+            )
+
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure
+
+        phi = (np.degrees(self.y_grid) if azimuth_in_degrees
+               else self.y_grid)
+
+        kwargs = dict(shading="auto")
+        kwargs.update(pcolormesh_kwargs)
+        pcm = ax.pcolormesh(phi, self.x_grid, self.gridded, **kwargs)
+        ax.set_xlabel("azimuth [deg]" if azimuth_in_degrees
+                      else "azimuth [rad]")
+        ax.set_ylabel("radius [arcsec]")
+        fig.colorbar(pcm, ax=ax)
+
+        if show_rings:
+            rk = dict(color="white", lw=0.5, alpha=0.6)
+            if ring_kwargs:
+                rk.update(ring_kwargs)
+            for r in self.ref_rs:
+                ax.axhline(r, **rk)
+
         return fig if return_fig else None
