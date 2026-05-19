@@ -821,7 +821,7 @@ class StructureFunction2DStack:
 
     _NORMALIZE_LABELS = {
         None: r"$S_2$",
-        "row_max": r"$S_2 / \max_\ell(S_2)$",
+        "row_max": r"$S_2\,\, /\,\, \max_\ell(S_2)$",
     }
 
     @classmethod
@@ -885,6 +885,63 @@ class StructureFunction2DStack:
             return X, Y, C
         return self.lags_y, self.ref_rs, C
 
+    def evaluate_spiral_heatmap(self, popt, modes, arclength=False,
+                                normalize=None):
+        """Evaluate a fitted spiral model on every ring's ``lags_y`` axis.
+
+        Returns ``(X, Y, C)`` in the same shape as
+        :meth:`calculate_azimuthal_heatmap`, so the result drops
+        straight into the same ``pcolormesh`` call for a side-by-side
+        data / model comparison.
+
+        Typical use:
+
+            popt, perr = stack.fit_spiral(modes=(1, 2, 3))
+            X_d, Y_d, C_d = stack.calculate_azimuthal_heatmap()
+            X_m, Y_m, C_m = stack.evaluate_spiral_heatmap(
+                popt, modes=(1, 2, 3))
+            # Compare C_d (data) and C_m (model) — same shape.
+
+        Args:
+            popt (ndarray): Per-ring best-fit parameters, shape
+                ``(N_ref, 1 + len(modes))``. Column 0 is ``Nphi``;
+                subsequent columns are the mode amplitudes in the same
+                order as ``modes``. Usually comes from
+                :meth:`fit_spiral`.
+            modes (sequence of int): The mode list that produced
+                ``popt``. Must match the column count of ``popt``.
+            arclength (Optional[bool]): As in
+                :meth:`calculate_azimuthal_heatmap`.
+            normalize (Optional[str]): Per-row rescaling. Apply the
+                **same** normalize choice to both data and model
+                heatmaps when comparing.
+
+        Returns:
+            X, Y, C: same return contract as
+                :meth:`calculate_azimuthal_heatmap`; ``C`` is the model
+                evaluated at each ring's parameters, shape
+                ``(N_ref, mly+1)``.
+        """
+        popt = np.asarray(popt, dtype=float)
+        modes = tuple(int(m) for m in modes)
+        expected = (len(self.results), 1 + len(modes))
+        if popt.shape != expected:
+            raise ValueError(
+                f"popt has shape {popt.shape}; expected {expected} "
+                f"for {len(modes)} modes and {len(self.results)} rings."
+            )
+
+        phi = self.lags_y
+        model = _make_spiral_model(modes)
+        C = np.stack([model(p, phi) for p in popt])
+        C = self._apply_heatmap_normalize(C, normalize)
+
+        if arclength:
+            X = self.ref_rs[:, None] * np.radians(phi)[None, :]
+            Y = np.broadcast_to(self.ref_rs[:, None], X.shape)
+            return X, Y, C
+        return phi, self.ref_rs, C
+
     def calculate_radial_heatmap(self, two_sided=None, normalize=None):
         """Return the ``(X, Y, C)`` arrays for the radial-slice heatmap.
 
@@ -936,14 +993,15 @@ class StructureFunction2DStack:
         X, Y, C = self.calculate_azimuthal_heatmap(arclength=arclength,
                                                    normalize=normalize)
 
-        kwargs = dict(shading="auto")
+        kwargs = dict(shading="auto", rasterized=True)
         kwargs.update(pcolormesh_kwargs)
         pcm = ax.pcolormesh(X, Y, C, **kwargs)
-        ax.set_xlabel("azimuthal arc length [arcsec]" if arclength
-                      else "azimuthal lag [deg]")
-        ax.set_ylabel("reference radius [arcsec]")
-        fig.colorbar(pcm, ax=ax,
-                     label=self._heatmap_normalize_label(normalize))
+        ax.set_xlabel(r"$\ell_\phi$ (arcsec)" if arclength
+                      else r"$\ell_\phi$ (deg)")
+        ax.set_ylabel(r"$r_{\rm ref}$ (arcsec)")
+        cbar = fig.colorbar(pcm, ax=ax, pad=0.02)
+        cbar.ax.set_ylabel(self._heatmap_normalize_label(normalize),
+                        rotation=270, labelpad=13)
         return fig if return_fig else None
 
     def plot_radial_heatmap(self, ax=None, return_fig=False,
@@ -972,23 +1030,30 @@ class StructureFunction2DStack:
         X, Y, C = self.calculate_radial_heatmap(two_sided=two_sided,
                                                 normalize=normalize)
 
-        kwargs = dict(shading="auto")
+        kwargs = dict(shading="auto", rasterized=True)
         kwargs.update(pcolormesh_kwargs)
         pcm = ax.pcolormesh(X, Y, C, **kwargs)
-        ax.set_xlabel("radial lag [arcsec]")
-        ax.set_ylabel("reference radius [arcsec]")
-        fig.colorbar(pcm, ax=ax,
-                     label=self._heatmap_normalize_label(normalize))
+        ax.set_xlabel(r"$\ell_r$ (arcsec)")
+        ax.set_ylabel(r"$r_{\rm ref}$ (arcsec)")
+        cbar = fig.colorbar(pcm, ax=ax, pad=0.02)
+        cbar.ax.set_ylabel(self._heatmap_normalize_label(normalize),
+                        rotation=270, labelpad=13)
         return fig if return_fig else None
 
     def plot_gridded(self, ax=None, return_fig=False,
                      azimuth_in_degrees=True, show_rings=False,
-                     ring_kwargs=None, **pcolormesh_kwargs):
+                     ring_kwargs=None, center=0.0,
+                     **pcolormesh_kwargs):
         """Plot the polar-deprojected field that the stack was computed from.
 
         Useful as a sanity-check companion to the heatmaps: lets you see
         whether the structure picked up at a given ``ref_r`` corresponds
         to a visible feature in the source data.
+
+        By default uses the eddy ``imagecube.cmap()`` (the diverging
+        blue-white-red map shared with :meth:`rotationmap.plot_data`)
+        and a symmetric colour scale around ``center`` — matching the
+        rotation-map convention so a velocity residual reads naturally.
 
         Args:
             ax (Optional): Matplotlib ``Axes`` to draw into.
@@ -1001,7 +1066,13 @@ class StructureFunction2DStack:
             ring_kwargs (Optional[dict]): Kwargs for the ring overlay
                 (forwarded to ``ax.axhline``). Defaults to a thin white
                 semi-transparent line.
-            **pcolormesh_kwargs: Forwarded to ``ax.pcolormesh``.
+            center (Optional[float]): Centre value for the symmetric
+                colour scale. Default ``0.0``. Pass ``None`` to fall
+                back to matplotlib's auto-scaling. ``vmin``/``vmax`` in
+                ``pcolormesh_kwargs`` override this entirely.
+            **pcolormesh_kwargs: Forwarded to ``ax.pcolormesh``. Override
+                ``cmap`` here if you don't want the eddy diverging map
+                (e.g. ``cmap='viridis'`` for an intensity field).
 
         Raises:
             ValueError: If ``self.gridded`` was not stored on the stack
@@ -1023,9 +1094,21 @@ class StructureFunction2DStack:
         phi = (np.degrees(self.y_grid) if azimuth_in_degrees
                else self.y_grid)
 
-        kwargs = dict(shading="auto")
-        kwargs.update(pcolormesh_kwargs)
-        pcm = ax.pcolormesh(phi, self.x_grid, self.gridded, **kwargs)
+        # Defaults — only applied where the user hasn't overridden.
+        plot_kwargs = dict(shading="auto", rasterized=True)
+        if "cmap" not in pcolormesh_kwargs:
+            from .imagecube import imagecube
+            plot_kwargs["cmap"] = imagecube.cmap()
+        if (center is not None
+                and "vmin" not in pcolormesh_kwargs
+                and "vmax" not in pcolormesh_kwargs):
+            lo, hi = np.nanpercentile(self.gridded, [2, 98])
+            half = max(abs(lo - center), abs(hi - center))
+            plot_kwargs["vmin"] = center - half
+            plot_kwargs["vmax"] = center + half
+        plot_kwargs.update(pcolormesh_kwargs)
+
+        pcm = ax.pcolormesh(phi, self.x_grid, self.gridded, **plot_kwargs)
         ax.set_xlabel("azimuth [deg]" if azimuth_in_degrees
                       else "azimuth [rad]")
         ax.set_ylabel("radius [arcsec]")
