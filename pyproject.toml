@@ -96,4 +96,4 @@ where = ["."]
 include = ["eddy*"]
 
 [tool.setuptools.package-data]
-eddy = ["*.yml"]
+eddy = ["*.yml", "py.typed"]

@@ -40,9 +40,13 @@ __all__ = [
     "setup_lag_coords",
     "extract_basic_profiles",
     "combine_s2_weighted",
+    "gaussian_beam_s2",
     "S2phi",
     "S2phi_singlemodel",
 ]
+
+
+_FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 
 _NUMBA_INSTALL_MSG = (
@@ -361,6 +365,122 @@ def combine_s2_weighted(S2_list, counts_list):
     return S2_combined, S2_error, S2_std
 
 
+# -- ANALYTIC BEAM PREDICTION -- #
+
+
+def gaussian_beam_s2(bmaj, bmin, bpa, lags_x, lags_y, sigma2,
+                     counts=None, n_bins=50, log_spaced=False,
+                     x_label="lag_x", y_label="lag_y"):
+    """Analytic ``S_2`` for white pixel noise convolved with a 2D Gaussian beam.
+
+    For per-pixel noise with variance ``sigma2`` smoothed by a Gaussian
+    beam B, the noise covariance is ``C(l) = sigma2 * rho(l)``, where
+    ``rho`` is the normalised beam-beam autocorrelation: a Gaussian with
+    the same orientation as the beam but with axis sigmas of
+    ``sqrt(2) * sigma_beam`` along major and minor. The structure
+    function is then
+
+        S_2(l) = 2 * sigma2 * (1 - rho(l))
+
+    so ``S_2 -> 0`` at zero lag and ``S_2 -> 2*sigma2`` at lags much
+    larger than the beam.
+
+    This is the "naive PSF" prediction; the difference between this and
+    an empirical ``S_2`` computed from real noise channels exposes any
+    extra correlated structure introduced by the imaging pipeline
+    (CLEAN residuals, sidelobe leakage, deconvolution bias, etc.).
+
+    Args:
+        bmaj, bmin (float): Beam FWHM in the same units as ``lags_x``
+            and ``lags_y`` (typically arcsec).
+        bpa (float): Beam position angle in degrees. Standard FITS
+            convention: measured from the axis-0 direction (image y /
+            declination) toward axis-1 (image x / RA). The
+            autocorrelation is symmetric under PA -> PA + 180.
+        lags_x (ndarray): Positive lags along axis 0, shape
+            ``(max_lag_x + 1,)`` -- as produced by
+            :meth:`StructureFunction2D.lags_x`.
+        lags_y (ndarray): Positive lags along axis 1, shape
+            ``(max_lag_y + 1,)``.
+        sigma2 (float): Per-pixel noise variance (e.g.
+            ``cube.rms ** 2``).
+        counts (Optional[ndarray]): Pair-count grid to attach to the
+            returned :class:`StructureFunction2D`, e.g. copied from a
+            companion empirical result for like-for-like weighting in
+            :meth:`StructureFunction2D.combine`. Defaults to ones.
+        n_bins, log_spaced: Forwarded to :func:`extract_basic_profiles`
+            for the 1D profile extraction.
+        x_label, y_label (str): Lag-axis labels for the returned
+            :class:`StructureFunction2D` (default ``"lag_x"`` /
+            ``"lag_y"``).
+
+    Returns:
+        :class:`StructureFunction2D` whose ``S2`` is the analytic
+        prediction on the supplied lag grid.
+    """
+    lags_x = np.asarray(lags_x, dtype=float)
+    lags_y = np.asarray(lags_y, dtype=float)
+    if lags_x.ndim != 1 or lags_y.ndim != 1:
+        raise ValueError("lags_x and lags_y must be 1D positive-lag arrays.")
+    if lags_x[0] != 0.0 or lags_y[0] != 0.0:
+        raise ValueError("lags_x and lags_y must start at zero.")
+
+    max_lag_x = lags_x.size - 1
+    max_lag_y = lags_y.size - 1
+    dx = float(lags_x[1] - lags_x[0]) if max_lag_x > 0 else 1.0
+    dy = float(lags_y[1] - lags_y[0]) if max_lag_y > 0 else 1.0
+
+    # Build two-sided lag grids that match compute_s2's output layout.
+    lag_x_full = np.arange(-max_lag_x, max_lag_x + 1) * dx
+    lag_y_full = np.arange(-max_lag_y, max_lag_y + 1) * dy
+    LX, LY = np.meshgrid(lag_x_full, lag_y_full, indexing="ij")
+
+    # Rotate (lag_axis0, lag_axis1) into (l_major, l_minor) in the
+    # beam's principal-axis frame. PA is the FITS beam position angle:
+    # measured east of north. eddy stores cubes with axis 0 = +DEC
+    # (north) and axis 1 = -RA (west), since xaxis is flipped to be
+    # monotonically decreasing (imagecube enforces this). So east =
+    # -axis1, and the major-axis unit vector at PA east-of-north is
+    # (cos PA, -sin PA) in (axis0, axis1) components.
+    phi = np.radians(float(bpa))
+    cos_p, sin_p = np.cos(phi), np.sin(phi)
+    l_maj = LX * cos_p - LY * sin_p
+    l_min = LX * sin_p + LY * cos_p
+
+    # Beam autocorrelation sigma is sqrt(2) * beam sigma along each
+    # axis -- the convolution-of-Gaussian-with-itself rule.
+    sigma_maj = float(bmaj) * _FWHM_TO_SIGMA
+    sigma_min = float(bmin) * _FWHM_TO_SIGMA
+    sigma_maj_auto2 = 2.0 * sigma_maj * sigma_maj
+    sigma_min_auto2 = 2.0 * sigma_min * sigma_min
+
+    rho = np.exp(-(l_maj * l_maj) / (2.0 * sigma_maj_auto2)
+                 - (l_min * l_min) / (2.0 * sigma_min_auto2))
+    S2 = 2.0 * float(sigma2) * (1.0 - rho)
+
+    if counts is None:
+        counts = np.ones_like(S2, dtype=np.int64)
+    else:
+        counts = np.asarray(counts)
+        if counts.shape != S2.shape:
+            raise ValueError(
+                "counts shape {} does not match S2 shape {}."
+                .format(counts.shape, S2.shape)
+            )
+
+    lx, ly, lags_i, S2_x, S2_y, S2_i = extract_basic_profiles(
+        S2, max_lag_x, max_lag_y, dx=dx, dy=dy,
+        n_bins=n_bins, log_spaced=log_spaced,
+    )
+    return StructureFunction2D(
+        S2=S2, counts=counts, dx=dx, dy=dy,
+        lags_x=lx, lags_y=ly, lags_i=lags_i,
+        S2_x=S2_x, S2_y=S2_y, S2_i=S2_i,
+        x_label=x_label, y_label=y_label,
+        symmetrized=True,
+    )
+
+
 # -- 1D AZIMUTHAL SPIRAL MODEL -- #
 
 
@@ -576,6 +696,116 @@ class StructureFunction2D:
         combined.combined_error = S2_err
         combined.combined_std = S2_std
         return combined
+
+    def compare_to(self, other, eps=1e-30):
+        """Compare this ``S_2`` against another on the same lag grid.
+
+        The natural use case is empirical-vs-analytic: subtract the
+        Gaussian-beam prediction from a measured noise ``S_2`` to expose
+        the excess correlated structure left over by the imaging
+        pipeline.
+
+        Args:
+            other (StructureFunction2D): The reference ``S_2`` to
+                compare against. Must share ``S2`` shape and ``dx, dy``.
+            eps (float): Floor added to ``other.S2`` in the ratio to
+                avoid division by zero at zero lag (where the analytic
+                prediction is exactly zero).
+
+        Returns:
+            dict with keys:
+                ``diff`` (ndarray): ``self.S2 - other.S2``.
+                ``ratio`` (ndarray): ``self.S2 / (other.S2 + eps)``.
+                ``diff_x``, ``diff_y``, ``diff_i`` (ndarray): 1D cuts
+                    along axis 0, axis 1, and the azimuthal average.
+                ``ratio_x``, ``ratio_y``, ``ratio_i`` (ndarray): same
+                    for the ratio.
+                ``other`` (StructureFunction2D): reference, for plotting.
+        """
+        if self.S2.shape != other.S2.shape:
+            raise ValueError("S2 shapes do not match: {} vs {}."
+                             .format(self.S2.shape, other.S2.shape))
+        if self.dx != other.dx or self.dy != other.dy:
+            raise ValueError("dx, dy do not match.")
+
+        diff = self.S2 - other.S2
+        ratio = self.S2 / (other.S2 + eps)
+        return {
+            "diff": diff,
+            "ratio": ratio,
+            "diff_x": self.S2_x - other.S2_x,
+            "diff_y": self.S2_y - other.S2_y,
+            "diff_i": self.S2_i - other.S2_i,
+            "ratio_x": self.S2_x / (other.S2_x + eps),
+            "ratio_y": self.S2_y / (other.S2_y + eps),
+            "ratio_i": self.S2_i / (other.S2_i + eps),
+            "other": other,
+        }
+
+    def plot_comparison(self, other, axes=None, return_fig=False,
+                        labels=("empirical", "analytic")):
+        """Three-panel summary: 1D profile overlays, 2D difference, and
+        1D residual profiles.
+
+        Args:
+            other (StructureFunction2D): The reference (typically the
+                Gaussian-beam analytic prediction).
+            axes (Optional[sequence of matplotlib.axes.Axes]): Length-3
+                axes to draw into. New figure if ``None``.
+            return_fig (bool): Return the figure object.
+            labels (tuple of str): Legend labels for ``self`` and
+                ``other`` on the profile panels.
+
+        Returns:
+            Optional[matplotlib.figure.Figure]
+        """
+        import matplotlib.pyplot as plt
+
+        if axes is None:
+            fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+        else:
+            fig = axes[0].figure
+
+        ax0, ax1, ax2 = axes
+
+        # 1D profile overlay: azimuthal average + two principal cuts.
+        ax0.plot(self.lags_i, self.S2_i, label="{} (avg)".format(labels[0]))
+        ax0.plot(other.lags_i, other.S2_i, ls="--",
+                 label="{} (avg)".format(labels[1]))
+        ax0.plot(self.lags_x, self.S2_x, alpha=0.5,
+                 label="{} ({})".format(labels[0], self.x_label))
+        ax0.plot(self.lags_y, self.S2_y, alpha=0.5,
+                 label="{} ({})".format(labels[0], self.y_label))
+        ax0.set_xlabel("lag")
+        ax0.set_ylabel(r"$S_2$")
+        ax0.legend(fontsize=8)
+        ax0.set_title("profiles")
+
+        # 2D difference map.
+        diff = self.S2 - other.S2
+        vmax = float(np.nanmax(np.abs(diff))) if np.any(np.isfinite(diff)) else 1.0
+        im = ax1.imshow(diff, origin="lower", aspect="auto",
+                        extent=self.extent, cmap="RdBu_r",
+                        vmin=-vmax, vmax=vmax)
+        ax1.set_xlabel(self.y_label)
+        ax1.set_ylabel(self.x_label)
+        ax1.set_title(r"$S_2$ residual ({} - {})".format(*labels))
+        fig.colorbar(im, ax=ax1)
+
+        # 1D residual cuts.
+        ax2.plot(self.lags_i, self.S2_i - other.S2_i, label="azimuthal avg")
+        ax2.plot(self.lags_x, self.S2_x - other.S2_x, alpha=0.7,
+                 label=self.x_label)
+        ax2.plot(self.lags_y, self.S2_y - other.S2_y, alpha=0.7,
+                 label=self.y_label)
+        ax2.axhline(0.0, color="k", lw=0.5, ls=":")
+        ax2.set_xlabel("lag")
+        ax2.set_ylabel(r"$\Delta S_2$")
+        ax2.legend(fontsize=8)
+        ax2.set_title("residual")
+
+        fig.tight_layout()
+        return fig if return_fig else None
 
     def fit_spiral(self, modes=(1,), axis=None, p0=None):
         """Fit a multi-mode spiral model to a 1D azimuthal slice of S_2.

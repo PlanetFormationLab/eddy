@@ -188,6 +188,195 @@ class linecube(imagecube):
         rms = np.where(rmask[None, :, :], rms, np.nan)
         return np.sqrt(np.nansum(rms**2) / np.sum(np.isfinite(rms)))
 
+    def gaussian_beam_s2(self, lags_x, lags_y=None, sigma2=None,
+                         counts=None, N=10, r_in=0.0, r_out=1e10,
+                         n_bins=50, log_spaced=False,
+                         x_label="lag_x", y_label="lag_y"):
+        """Analytic Gaussian-beam noise ``S_2`` prediction for this cube.
+
+        Convenience wrapper around
+        :func:`eddy.structurefunction.gaussian_beam_s2` that fills the
+        beam parameters from the cube header (``bmaj``, ``bmin``,
+        ``bpa``) and the per-pixel noise variance from
+        :meth:`estimate_cube_RMS`.
+
+        The ergonomic path is to pass the empirical
+        :class:`StructureFunction2D` directly -- the lag grid and pair
+        counts are then taken from it, so the two ``S_2`` instances are
+        guaranteed to be diffable. Match ``r_in`` / ``r_out`` to what
+        was used for the empirical so ``sigma2`` is computed over the
+        same noise region:
+
+            emp = cube.noise_structure_function(r_in=1.5, r_out=4.0)
+            ana = cube.gaussian_beam_s2(emp, r_in=1.5, r_out=4.0)
+            emp.plot_comparison(ana)
+
+        Args:
+            lags_x: Either a 1D array of positive lags along axis 0,
+                or a :class:`StructureFunction2D` -- in which case
+                ``lags_x``, ``lags_y``, and ``counts`` are taken from
+                that instance.
+            lags_y (Optional[ndarray]): 1D positive lags along axis 1.
+                Ignored if ``lags_x`` is a ``StructureFunction2D``.
+            sigma2 (Optional[float]): Per-pixel noise variance. If
+                ``None``, defaults to
+                ``estimate_cube_RMS(N=N, r_in=r_in, r_out=r_out)**2``.
+                Pass the same ``r_in`` / ``r_out`` you used for the
+                empirical ``S_2``; otherwise the two compare against
+                inconsistent ``sigma^2`` plateaus and the "excess
+                structure" residual is dominated by that mismatch.
+            counts (Optional[ndarray]): Pair counts to attach to the
+                returned result. Defaults to the empirical's counts if
+                ``lags_x`` is a ``StructureFunction2D``, else ones.
+            N (int): Edge-channel count for the default RMS estimate.
+            r_in, r_out (float): Annulus [arcsec] for the default RMS
+                estimate.
+            n_bins, log_spaced: Forwarded to
+                :func:`extract_basic_profiles` for the 1D profiles.
+            x_label, y_label (str): Lag-axis labels.
+
+        Returns:
+            :class:`eddy.structurefunction.StructureFunction2D`
+        """
+        from .structurefunction import (
+            StructureFunction2D,
+            gaussian_beam_s2 as _gaussian_beam_s2,
+        )
+
+        if isinstance(lags_x, StructureFunction2D):
+            match = lags_x
+            lags_x = match.lags_x
+            if lags_y is None:
+                lags_y = match.lags_y
+            if counts is None:
+                counts = match.counts
+        elif lags_y is None:
+            raise ValueError(
+                "lags_y is required unless lags_x is a StructureFunction2D."
+            )
+
+        if sigma2 is None:
+            sigma2 = float(
+                self.estimate_cube_RMS(N=N, r_in=r_in, r_out=r_out)
+            ) ** 2
+
+        return _gaussian_beam_s2(
+            self.bmaj, self.bmin, self.bpa,
+            lags_x, lags_y, sigma2=sigma2, counts=counts,
+            n_bins=n_bins, log_spaced=log_spaced,
+            x_label=x_label, y_label=y_label,
+        )
+
+    def noise_structure_function(self, channels=None, N=10,
+                                 r_in=0.0, r_out=1e10,
+                                 max_lag_x=None, max_lag_y=None,
+                                 n_bins=50, log_spaced=False,
+                                 return_per_channel=False,
+                                 symmetrize=True):
+        """Empirical 2D structure function of the noise channels.
+
+        Each requested channel is masked to a circular annulus
+        ``r_in <= r <= r_out`` (matching :meth:`estimate_cube_RMS`'s
+        convention -- use ``r_in > 0`` to exclude residual emission in
+        the centre, ``r_out`` to exclude noisy edges), passed to
+        :meth:`eddy.structurefunction.StructureFunction2D.from_array`,
+        and the per-channel results are combined via pair-count-weighted
+        averaging.
+
+        To compare against the naive Gaussian-beam prediction, pair this
+        with :func:`eddy.structurefunction.gaussian_beam_s2` evaluated
+        on the same lag grid and ``sigma2 = self.rms ** 2``:
+
+            empirical = cube.noise_structure_function(r_in=1.5)
+            from eddy.structurefunction import gaussian_beam_s2
+            analytic = gaussian_beam_s2(
+                cube.bmaj, cube.bmin, cube.bpa,
+                empirical.lags_x, empirical.lags_y,
+                sigma2=cube.rms**2, counts=empirical.counts,
+            )
+            empirical.plot_comparison(analytic)
+
+        Args:
+            channels (Optional[sequence of int]): Channel indices to use.
+                If ``None``, defaults to the first and last ``N`` channels
+                of the cube (matching :meth:`estimate_cube_RMS`).
+            N (int): Edge-channel count used when ``channels`` is
+                ``None``. Ignored otherwise.
+            r_in (float): Inner mask radius [arcsec]. Pixels with
+                ``r < r_in`` are NaN-masked and excluded from pair
+                averages.
+            r_out (float): Outer mask radius [arcsec].
+            max_lag_x, max_lag_y (Optional[int]): Maximum lag along
+                axis 0 / axis 1 in pixels. Defaults to half the image.
+            n_bins (int): Radial bins for the azimuthal average.
+            log_spaced (bool): Log-spaced radial bins.
+            return_per_channel (bool): If ``True``, also return the
+                list of per-channel :class:`StructureFunction2D`
+                results.
+            symmetrize (bool): Forwarded to
+                :class:`StructureFunction2D.from_array`. Noise has
+                no preferred radial direction, so the default ``True``
+                is almost always what you want.
+
+        Returns:
+            ``StructureFunction2D`` (combined across channels), or
+            ``(combined, per_channel_list)`` if ``return_per_channel``.
+
+        Notes:
+            If the cube was loaded with ``fill=0.0`` (the default) and
+            a ``FOV`` clip was applied, off-FOV pixels were filled with
+            zero and will contribute spurious zero-difference pairs to
+            ``S_2``. Reload with ``fill=np.nan`` or set ``r_out`` to
+            exclude that region.
+        """
+        from .structurefunction import StructureFunction2D, _require_numba
+        _require_numba()
+
+        if channels is None:
+            N = int(N)
+            if N < 1:
+                raise ValueError("N must be >= 1.")
+            n_total = self.data.shape[0]
+            if 2 * N > n_total:
+                raise ValueError(
+                    "Requested 2*N={} > nchan={}.".format(2 * N, n_total)
+                )
+            channels = np.concatenate([np.arange(N),
+                                       np.arange(n_total - N, n_total)])
+        channels = np.asarray(channels, dtype=int).ravel()
+        if channels.size == 0:
+            raise ValueError("No channels selected.")
+
+        r = np.hypot(self.xaxis[None, :], self.yaxis[:, None])
+        keep = np.logical_and(r >= r_in, r <= r_out)
+        if not np.any(keep):
+            raise ValueError("Mask is empty; check r_in / r_out.")
+
+        dpix = float(abs(self.dpix))
+
+        per_channel = []
+        for c in channels:
+            chan = np.where(keep, np.asarray(self.data[c], dtype=float),
+                            np.nan)
+            sf = StructureFunction2D.from_array(
+                chan, dx=dpix, dy=dpix,
+                max_lag_x=max_lag_x, max_lag_y=max_lag_y,
+                n_bins=n_bins, log_spaced=log_spaced,
+                symmetrize=symmetrize,
+            )
+            per_channel.append(sf)
+
+        if len(per_channel) == 1:
+            combined = per_channel[0]
+        else:
+            combined = per_channel[0].combine(per_channel[1:],
+                                              n_bins=n_bins,
+                                              log_spaced=log_spaced)
+
+        if return_per_channel:
+            return combined, per_channel
+        return combined
+
     def integrated_spectrum(self, x0=0.0, y0=0.0, inc=0.0, PA=0.0, r_min=None,
                             r_max=None):
         """
