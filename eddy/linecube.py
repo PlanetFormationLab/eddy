@@ -130,17 +130,7 @@ class linecube(imagecube):
 
     # -- 3D CUBE I/O & DIAGNOSTICS -- #
 
-    # Velocity-unit moment maps -- collapse methods whose first product
-    # is a line-centroid velocity in the same units as ``self.velax``.
-    # For these, ``to_momentmap`` returns a :class:`rotationmap` so the
-    # output composes directly with ``fit_map`` etc. All other methods
-    # produce intensity-unit maps and return a :class:`momentmap`.
-    _BM_VELOCITY_METHODS = frozenset({
-        'first', 'quadratic', 'gaussian', 'gausshermite',
-        'gaussthick', 'doublegauss',
-    })
-
-    def to_momentmap(self, method='zeroth', clip=None,
+    def to_momentmap(self, method='zeroth', product=None, clip=None,
                      bettermoments_kwargs=None):
         """Collapse the spectral cube to a 2D moment map via
         ``bettermoments``.
@@ -151,6 +141,13 @@ class linecube(imagecube):
                 ``'first'``, ``'quadratic'``, ``'maximum'``,
                 ``'gaussian'``). See :mod:`bettermoments` for the full
                 list and what each one returns.
+            product (Optional[str]): Suffix of the specific moment
+                product to return, as named by ``bettermoments`` (e.g.
+                ``'M0'``, ``'v0'``, ``'wp50'``, ``'gv0'``). If
+                ``None`` (default), the first product of the method is
+                used — matching the historical behaviour. Uncertainty
+                suffixes (``'d…'``) are rejected; the matching
+                uncertainty array is attached as ``.error`` instead.
             clip (Optional[float]): If set, replace pixels with
                 ``|data| < clip * rms`` by zero before collapsing —
                 matches ``bettermoments``'s sigma-clipping convention.
@@ -163,11 +160,10 @@ class linecube(imagecube):
                 ...) accept ``indices`` and ``ncpu``.
 
         Returns:
-            A :class:`rotationmap` instance for velocity-typed methods
-            (``first``, ``quadratic``, ``gaussian``, ``gausshermite``,
-            ``gaussthick``, ``doublegauss``) and a :class:`momentmap`
-            instance otherwise. The first uncertainty product (if the
-            method returns one, e.g. ``dM0``, ``dM1``, ``dv0``) is
+            A :class:`rotationmap` instance when the selected product is
+            a velocity field (``bettermoments`` unit ``'m/s'``) and a
+            :class:`momentmap` instance otherwise. The matching
+            uncertainty product (``'d' + product``, if present) is
             attached as ``self.error`` on the returned object.
         """
         try:
@@ -188,6 +184,30 @@ class linecube(imagecube):
                 .format(method)
             )
 
+        # Canonical ordered list of product suffixes for this method,
+        # e.g. ``['v0', 'dv0', 'Fnu', 'dFnu']`` for ``quadratic``.
+        bm_products = [s.strip() for s in
+                       bm.methods.collapse_method_products(method_key)
+                       .split(',')]
+
+        if product is None:
+            product = bm_products[0]
+        elif product not in bm_products:
+            raise ValueError(
+                "Unknown product '{}' for method '{}'. Valid suffixes: {}."
+                .format(product, method_key, ', '.join(bm_products))
+            )
+        elif product.startswith('d') and product[1:] in bm_products:
+            raise ValueError(
+                "'{}' is an uncertainty product; pass product='{}' "
+                "instead — the uncertainty is attached as .error."
+                .format(product, product[1:])
+            )
+
+        idx = bm_products.index(product)
+        err_key = 'd' + product
+        err_idx = bm_products.index(err_key) if err_key in bm_products else None
+
         rms = float(self.estimate_cube_RMS())
         data = np.asarray(self.data)
         if clip is not None:
@@ -200,24 +220,24 @@ class linecube(imagecube):
         # Normalise the return to a tuple of 2D arrays. Most collapse
         # functions return a tuple; ``collapse_quadratic`` (and a couple
         # of others) instead return a single stacked 3D ndarray whose
-        # leading axis enumerates the products. Either way, the first
-        # entry is the moment map and the second (if any) is its
-        # uncertainty.
+        # leading axis enumerates the products.
         if isinstance(products, np.ndarray):
             if products.ndim == 3:
                 products = tuple(products[i] for i in range(products.shape[0]))
             else:
                 products = (products,)
-        moment = np.asarray(products[0])
+        moment = np.asarray(products[idx])
 
-        if method_key in self._BM_VELOCITY_METHODS:
+        # Use bettermoments' canonical unit string for the chosen
+        # product — ``'m/s'`` flags velocity fields (→ rotationmap);
+        # everything else is intensity-typed (→ momentmap).
+        bunit = bm.io._get_bunits(self.path)[product]
+        if bunit == 'm/s':
             from .rotationmap import rotationmap
             out_cls = rotationmap
-            unit_override = 'm/s'      # self.velax is m/s, so v0 is too
         else:
             from .momentmap import momentmap
             out_cls = momentmap
-            unit_override = None
 
         # Round-trip through a temp FITS so the returned instance picks
         # up a consistent header rebuilt from the live xaxis/yaxis. This
@@ -230,8 +250,7 @@ class linecube(imagecube):
         from astropy.io import fits
 
         header = self._consistent_header(moment)
-        if unit_override is not None:
-            header['BUNIT'] = unit_override
+        header['BUNIT'] = bunit
 
         with tempfile.NamedTemporaryFile(suffix='.fits',
                                          delete=False) as tmp:
@@ -241,15 +260,16 @@ class linecube(imagecube):
                          header=header, overwrite=True)
             # Suppress rotationmap.__init__'s "Assuming uncertainties
             # in /tmp/...fits" prints — the temp path has no sibling
-            # uncertainty file, and we attach the proper dv0 below.
+            # uncertainty file, and we attach the proper d<product> below.
             with contextlib.redirect_stdout(io.StringIO()):
                 out = out_cls(path=tmp_path)
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-        if len(products) >= 2 and products[1] is not None:
-            out.error = np.asarray(products[1])
+        if err_idx is not None and err_idx < len(products) \
+                and products[err_idx] is not None:
+            out.error = np.asarray(products[err_idx])
 
         return out
 
