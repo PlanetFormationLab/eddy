@@ -131,7 +131,7 @@ class linecube(imagecube):
     # -- 3D CUBE I/O & DIAGNOSTICS -- #
 
     def to_momentmap(self, method='zeroth', product=None, clip=None,
-                     bettermoments_kwargs=None):
+                     smooth=0, polyorder=0, bettermoments_kwargs=None):
         """Collapse the spectral cube to a 2D moment map via
         ``bettermoments``.
 
@@ -152,6 +152,18 @@ class linecube(imagecube):
                 ``|data| < clip * rms`` by zero before collapsing —
                 matches ``bettermoments``'s sigma-clipping convention.
                 Set to ``None`` (the default) to skip clipping.
+            smooth (int): Width of the spectral smoothing kernel in
+                channels, forwarded to :func:`bettermoments.smooth_data`.
+                ``0`` (default) or ``1`` disables smoothing. When
+                smoothing is active, the RMS used both for the clip
+                threshold and as the ``rms`` argument to the collapse
+                function is re-estimated from the smoothed cube (via
+                :func:`bettermoments.estimate_RMS`), matching the
+                bettermoments CLI's order of operations.
+            polyorder (int): Polynomial order for the Savitzky-Golay
+                smoothing filter. ``0`` (default) means a plain top-hat
+                kernel; must be smaller than ``smooth``. Ignored when
+                ``smooth <= 1``.
             bettermoments_kwargs (Optional[dict]): Extra kwargs forwarded
                 to the ``bettermoments`` collapse function. Most simple
                 methods (``zeroth``, ``first``, ``quadratic``,
@@ -208,8 +220,19 @@ class linecube(imagecube):
         err_key = 'd' + product
         err_idx = bm_products.index(err_key) if err_key in bm_products else None
 
-        rms = float(self.estimate_cube_RMS())
         data = np.asarray(self.data)
+
+        # Match the bettermoments CLI flow: smooth first, then re-estimate
+        # the RMS from the smoothed cube (smoothing changes the noise
+        # level, so the clip threshold and the bettermoments rms argument
+        # should both come from the smoothed data).
+        if smooth and int(smooth) > 1:
+            data = bm.smooth_data(data=data, smooth=int(smooth),
+                                  polyorder=int(polyorder))
+            rms = float(bm.estimate_RMS(data, N=10))
+        else:
+            rms = float(self.estimate_cube_RMS())
+
         if clip is not None:
             data = np.where(np.abs(data) > float(clip) * rms, data, 0.0)
 

@@ -238,3 +238,28 @@ def test_to_momentmap_uncertainty_product_rejected(twhya_cube_path):
     cube = linecube(twhya_cube_path, FOV=4.0)
     with pytest.raises(ValueError, match="uncertainty product"):
         cube.to_momentmap(method='quadratic', product='dv0')
+
+
+def test_to_momentmap_smooth_changes_output(twhya_cube_path):
+    """Spectral smoothing should actually alter the moment map. Compares
+    M0 with and without smoothing; the smoothed map should differ from
+    the unsmoothed one and stay finite everywhere."""
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out_raw = cube.to_momentmap(method='zeroth')
+    out_smooth = cube.to_momentmap(method='zeroth', smooth=5, polyorder=3)
+    raw = np.asarray(out_raw.data)
+    smoothed = np.asarray(out_smooth.data)
+    assert smoothed.shape == raw.shape
+    assert np.all(np.isfinite(smoothed))
+    assert not np.allclose(smoothed, raw)
+
+
+def test_to_momentmap_smooth_zero_matches_unsmoothed(twhya_cube_path):
+    """smooth=0 (the default) should be a no-op — identical to omitting
+    the kwarg."""
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    a = cube.to_momentmap(method='zeroth')
+    b = cube.to_momentmap(method='zeroth', smooth=0, polyorder=0)
+    np.testing.assert_array_equal(np.asarray(a.data), np.asarray(b.data))
