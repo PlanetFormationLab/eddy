@@ -9,6 +9,107 @@ from .imagecube import imagecube
 from .annulus import annulus
 
 
+class SpectralACF:
+    """Pooled spectral auto-correlation function from a signal-free
+    region of a cube. Built by :meth:`linecube.spectral_acf`.
+
+    Under the null hypothesis that channels are statistically
+    independent, Bartlett's formula gives ``Var(rho_k) ~ 1/N`` for
+    ``k > 0``, where ``N`` is the number of independent sample pairs.
+    Here ``N = counts / pix_per_beam`` to fold in the spatial
+    correlation between pixels in the same beam.
+
+    Attributes:
+        lags (ndarray): Spectral lag in channels, ``0..max_lag``.
+        acf (ndarray): Pooled (Pearson) ACF averaged across pixels.
+            ``acf[0]`` is 1 by construction.
+        counts (ndarray): Number of ``(pixel, channel-pair)`` samples
+            contributing to each lag.
+        null_band (ndarray): Half-width of the 95% confidence interval
+            on ``acf[k]`` under the null hypothesis of independent
+            channels (``1.96 / sqrt(counts / pix_per_beam)``).
+        n_eff (ndarray): Effective independent sample count per lag,
+            ``counts / pix_per_beam``.
+        pix_per_beam (float): Inherited from the parent cube.
+        n_pixels (int): Number of spatial pixels in the annulus.
+        n_channels (int): Number of unmasked channels used.
+        chan_width (float): Channel width in the cube's velocity units.
+    """
+
+    def __init__(self, *, lags, acf, counts, null_band, n_eff,
+                 pix_per_beam, n_pixels, n_channels, chan_width):
+        self.lags = np.asarray(lags)
+        self.acf = np.asarray(acf)
+        self.counts = np.asarray(counts)
+        self.null_band = np.asarray(null_band)
+        self.n_eff = np.asarray(n_eff)
+        self.pix_per_beam = float(pix_per_beam)
+        self.n_pixels = int(n_pixels)
+        self.n_channels = int(n_channels)
+        self.chan_width = float(chan_width)
+
+    def significant_lags(self, alpha=0.05):
+        """Lags (excluding ``k=0``) at which ``|acf|`` exceeds the
+        null band scaled to confidence level ``1 - alpha``.
+
+        Args:
+            alpha (float): Two-sided significance level. ``0.05`` (the
+                default) reproduces the 95% null band on the plot.
+
+        Returns:
+            ndarray of lag values where the null is rejected.
+        """
+        from scipy.stats import norm
+        z = norm.ppf(1.0 - 0.5 * float(alpha))
+        band = z / np.sqrt(np.maximum(self.n_eff, 1.0))
+        sig = (self.lags > 0) & (np.abs(self.acf) > band)
+        return self.lags[sig]
+
+    def plot(self, ax=None, x_unit='channels', skip_zero=True,
+             return_fig=False):
+        """Plot the ACF with the 95% null band shaded.
+
+        Args:
+            ax: Existing matplotlib axis. Created if not supplied.
+            x_unit ({'channels', 'velocity'}): Lag axis units.
+                ``'velocity'`` multiplies by ``chan_width``.
+            skip_zero (bool): Hide ``k=0`` from the plot (it is
+                always 1 by construction and obscures the y-range).
+            return_fig (bool): If ``True``, return the matplotlib
+                figure rather than just the axis.
+
+        Returns:
+            ``fig`` if ``return_fig``, else ``ax``.
+        """
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure
+
+        sl = slice(1, None) if skip_zero else slice(None)
+        lags = self.lags[sl]
+        acf = self.acf[sl]
+        band = self.null_band[sl]
+
+        if x_unit == 'velocity':
+            x = lags * self.chan_width
+            xlabel = 'Spectral lag'
+        else:
+            x = lags
+            xlabel = 'Spectral lag [channels]'
+
+        ax.axhline(0.0, color='0.5', lw=0.8)
+        ax.fill_between(x, -band, band, color='C0', alpha=0.2,
+                        label='95% null band')
+        ax.plot(x, acf, color='C0', marker='o', ms=4, lw=1.2,
+                label='Empirical ACF')
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(r'$\hat{\rho}(\tau)$')
+        ax.legend(frameon=False)
+        return fig if return_fig else ax
+
+
 class linecube(imagecube):
     """
     Read in a line cube and initialize the class.
@@ -189,7 +290,7 @@ class linecube(imagecube):
         return np.sqrt(np.nansum(rms**2) / np.sum(np.isfinite(rms)))
 
     def gaussian_beam_s2(self, lags_x, lags_y=None, sigma2=None,
-                         counts=None, N=10, r_in=0.0, r_out=1e10,
+                         counts=None, N=None, r_in=None, r_out=None,
                          n_bins=50, log_spaced=False,
                          x_label="lag_x", y_label="lag_y"):
         """Analytic Gaussian-beam noise ``S_2`` prediction for this cube.
@@ -201,15 +302,18 @@ class linecube(imagecube):
         :meth:`estimate_cube_RMS`.
 
         The ergonomic path is to pass the empirical
-        :class:`StructureFunction2D` directly -- the lag grid and pair
-        counts are then taken from it, so the two ``S_2`` instances are
-        guaranteed to be diffable. Match ``r_in`` / ``r_out`` to what
-        was used for the empirical so ``sigma2`` is computed over the
-        same noise region:
+        :class:`StructureFunction2D` directly -- the lag grid, pair
+        counts, and (when available) the ``N`` / ``r_in`` / ``r_out``
+        mask used to build the empirical are inherited automatically,
+        so the two ``S_2`` instances share the same ``sigma2`` region:
 
             emp = cube.noise_structure_function(r_in=1.5, r_out=4.0)
-            ana = cube.gaussian_beam_s2(emp, r_in=1.5, r_out=4.0)
+            ana = cube.gaussian_beam_s2(emp)  # inherits r_in/r_out/N
             emp.plot_comparison(ana)
+
+        Explicit ``N`` / ``r_in`` / ``r_out`` always override the
+        inherited values. Without an empirical and without explicit
+        overrides, ``N=10``, ``r_in=0.0``, ``r_out=1e10`` are used.
 
         Args:
             lags_x: Either a 1D array of positive lags along axis 0,
@@ -250,10 +354,25 @@ class linecube(imagecube):
                 lags_y = match.lags_y
             if counts is None:
                 counts = match.counts
+            nm = getattr(match, "noise_mask", None)
+            if nm is not None:
+                if N is None:
+                    N = nm.get("N")
+                if r_in is None:
+                    r_in = nm.get("r_in")
+                if r_out is None:
+                    r_out = nm.get("r_out")
         elif lags_y is None:
             raise ValueError(
                 "lags_y is required unless lags_x is a StructureFunction2D."
             )
+
+        if N is None:
+            N = 10
+        if r_in is None:
+            r_in = 0.0
+        if r_out is None:
+            r_out = 1e10
 
         if sigma2 is None:
             sigma2 = float(
@@ -332,6 +451,7 @@ class linecube(imagecube):
         from .structurefunction import StructureFunction2D, _require_numba
         _require_numba()
 
+        user_channels = channels
         if channels is None:
             N = int(N)
             if N < 1:
@@ -373,9 +493,126 @@ class linecube(imagecube):
                                               n_bins=n_bins,
                                               log_spaced=log_spaced)
 
+        # Stash the mask used so gaussian_beam_s2 can inherit it for a
+        # like-for-like sigma2. Only meaningful when channels came from
+        # the default first/last-N scheme that estimate_cube_RMS uses.
+        if user_channels is None:
+            combined.noise_mask = {
+                "N": int(N), "r_in": float(r_in), "r_out": float(r_out),
+            }
+
         if return_per_channel:
             return combined, per_channel
         return combined
+
+    def spectral_acf(self, signal_channels=None, signal_velocity=None,
+                     r_in=0.0, r_out=1e10, max_lag=None):
+        """Channel-to-channel auto-correlation in a signal-free region.
+
+        For every pixel in the spatial annulus ``r_in <= r <= r_out``,
+        signal-bearing channels are NaN-masked out; the surviving
+        spectrum is mean-subtracted; and a pooled (Pearson-like) ACF
+        is accumulated across all pixels at each spectral lag.
+        Channel pairs that straddle a masked window are skipped
+        (so removing signal channels does not create spurious
+        lag-1 correlations across the gap).
+
+        The 95% null band on the returned :class:`SpectralACF` comes
+        from Bartlett's formula with the effective sample count
+        corrected for spatial pixel correlation by dividing the per-lag
+        pair count by ``pix_per_beam``. ``|acf[k]|`` exceeding the band
+        at lag ``k > 0`` is evidence of channel-to-channel correlation.
+
+        Args:
+            signal_channels (Optional[sequence of int]): Channel
+                indices that contain signal. These are NaN-masked
+                before pairing. Mutually exclusive with
+                ``signal_velocity``.
+            signal_velocity (Optional[tuple]): ``(v_min, v_max)``
+                velocity range containing signal. Channels with
+                ``v_min <= velax <= v_max`` are NaN-masked.
+            r_in (float): Inner mask radius [arcsec]. Pixels with
+                ``r < r_in`` are excluded -- use this to drop the
+                central emission region in a line cube.
+            r_out (float): Outer mask radius [arcsec].
+            max_lag (Optional[int]): Maximum spectral lag in channels.
+                Defaults to ``min(n_used // 4, 50)``.
+
+        Returns:
+            :class:`SpectralACF`
+        """
+        nchan = self.data.shape[0]
+
+        r = np.hypot(self.xaxis[None, :], self.yaxis[:, None])
+        keep_xy = np.logical_and(r >= float(r_in), r <= float(r_out))
+        if not np.any(keep_xy):
+            raise ValueError("Spatial mask is empty; check r_in / r_out.")
+
+        if signal_channels is not None and signal_velocity is not None:
+            raise ValueError(
+                "Pass signal_channels or signal_velocity, not both."
+            )
+        chan_mask = np.ones(nchan, dtype=bool)
+        if signal_channels is not None:
+            chan_mask[np.asarray(signal_channels, dtype=int).ravel()] = False
+        elif signal_velocity is not None:
+            v_min, v_max = signal_velocity
+            chan_mask &= ~np.logical_and(self.velax >= float(v_min),
+                                         self.velax <= float(v_max))
+        n_used = int(chan_mask.sum())
+        if n_used < 4:
+            raise ValueError(
+                "Fewer than 4 signal-free channels remain; "
+                "cannot estimate ACF."
+            )
+
+        if max_lag is None:
+            max_lag = min(n_used // 4, 50)
+        max_lag = int(max_lag)
+        if max_lag < 1 or max_lag >= nchan:
+            raise ValueError(
+                "max_lag must be in [1, nchan); got {}.".format(max_lag)
+            )
+
+        pix_y, pix_x = np.where(keep_xy)
+        data = np.asarray(self.data[:, pix_y, pix_x], dtype=float).copy()
+        # NaN-mask signal channels and any pre-existing NaN pixels.
+        data[~chan_mask, :] = np.nan
+        # Per-pixel demean over unmasked, finite samples.
+        with np.errstate(invalid="ignore"):
+            data -= np.nanmean(data, axis=0, keepdims=True)
+
+        lags = np.arange(max_lag + 1)
+        acf = np.empty(max_lag + 1, dtype=float)
+        counts = np.empty(max_lag + 1, dtype=np.int64)
+        for k in lags:
+            if k == 0:
+                x = data
+                y = data
+            else:
+                x = data[:-k]
+                y = data[k:]
+            valid = np.isfinite(x) & np.isfinite(y)
+            xk = np.where(valid, x, 0.0)
+            yk = np.where(valid, y, 0.0)
+            num = float(np.sum(xk * yk))
+            denom = np.sqrt(float(np.sum(xk * xk))
+                            * float(np.sum(yk * yk)))
+            counts[k] = int(valid.sum())
+            acf[k] = (num / denom) if denom > 0.0 else np.nan
+
+        pix_per_beam = float(self.pix_per_beam)
+        n_eff = np.maximum(counts / pix_per_beam, 1.0)
+        null_band = 1.96 / np.sqrt(n_eff)
+
+        return SpectralACF(
+            lags=lags, acf=acf, counts=counts,
+            null_band=null_band, n_eff=n_eff,
+            pix_per_beam=pix_per_beam,
+            n_pixels=int(keep_xy.sum()),
+            n_channels=n_used,
+            chan_width=float(abs(self.chan)) if self.chan is not None else 1.0,
+        )
 
     def integrated_spectrum(self, x0=0.0, y0=0.0, inc=0.0, PA=0.0, r_min=None,
                             r_max=None):
