@@ -95,7 +95,7 @@ class rotationmap(momentmap):
     def fit_map(self, p0, params, r_min=None, r_max=None, optimize=True,
                 nwalkers=None, nburnin=300, nsteps=100, scatter=1e-3,
                 plots=None, returns=None, pool=None, mcmc='emcee',
-                mcmc_kwargs=None, niter=1):
+                mcmc_kwargs=None, niter=1, optimize_kwargs=None):
         """
         Fit a rotation profile to the data. Note that for a disk with
         a non-zero height, the sign of the inclination dictates the direction
@@ -161,6 +161,11 @@ class rotationmap(momentmap):
                 positions. This is probably only useful if you have no idea
                 about the starting positions for the emission surface or if you
                 want to remove walkers stuck in local minima.
+            optimize_kwargs (Optional[dict]): Kwargs forwarded to
+                ``_optimize_p0`` (and thence ``scipy.optimize.minimize``).
+                Use ``method`` to override ``'L-BFGS-B'`` and ``options`` to
+                pass solver options such as ``ftol`` or ``maxiter``, e.g.
+                ``optimize_kwargs={'options': {'ftol': 1e-6}}``.
 
         Returns:
             to_return (list): Depending on the returns list provided.
@@ -206,7 +211,8 @@ class rotationmap(momentmap):
         # inverse variance mask.
 
         if optimize:
-            p0 = self._optimize_p0(p0, params_tmp)
+            p0 = self._optimize_p0(p0, params_tmp,
+                                   **(optimize_kwargs or {}))
 
         # Set up and run the MCMC with emcee.
 
@@ -756,10 +762,19 @@ class rotationmap(momentmap):
             res = minimize(nlnL, x0=np.asarray(theta), method=method,
                            bounds=bounds, options=options)
         if res.success:
+            theta_old = np.asarray(theta, dtype=float)
             theta = res.x
-            print("Optimized starting positions:")
+            denom = np.where(np.abs(theta_old) > 0, np.abs(theta_old), 1.0)
+            delta_max = float(np.max(np.abs(theta - theta_old) / denom))
+            print("Optimized starting positions "
+                  "(nit={}, max |Δp0|/|p0|={:.2%}):".format(
+                      getattr(res, 'nit', '?'), delta_max))
         else:
-            print("WARNING: scipy.optimize did not converge.")
+            print("WARNING: scipy.optimize did not converge "
+                  "(nit={}, status={}): {}".format(
+                      getattr(res, 'nit', '?'),
+                      getattr(res, 'status', '?'),
+                      getattr(res, 'message', '')))
             print("Starting positions:")
         print('\tp0 =', ['%.2e' % t for t in theta])
         return theta
