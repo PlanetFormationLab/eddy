@@ -1024,6 +1024,24 @@ class StructureFunction2DStack:
         ``(N_ref, n_bins)``."""
         return np.stack([r.S2_i for r in self.results])
 
+    @property
+    def extent(self):
+        """Matplotlib ``extent`` for ``imshow(self.gridded, origin='lower')``:
+        ``(y_grid_min, y_grid_max, x_grid_min, x_grid_max)``.
+
+        For a polar-deprojected stack this is ``(azim_min, azim_max,
+        rad_min, rad_max)`` in the stored units (radians and arcsec).
+        Pass ``np.degrees(...)`` on the first two values if you want the
+        azimuth axis in degrees to match :meth:`plot_gridded`'s default.
+        """
+        if self.x_grid is None or self.y_grid is None:
+            raise ValueError(
+                "extent requires x_grid/y_grid on the stack; the stack "
+                "was constructed without them."
+            )
+        return (float(self.y_grid[0]), float(self.y_grid[-1]),
+                float(self.x_grid[0]), float(self.x_grid[-1]))
+
     def fit_spiral(self, modes=(1,), axis=None, p0=None):
         """Fit a multi-mode spiral model at every reference radius.
 
