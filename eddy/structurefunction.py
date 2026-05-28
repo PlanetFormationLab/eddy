@@ -1217,6 +1217,63 @@ class StructureFunction2DStack:
         X = self.lags_x_full if two_sided else self.lags_x
         return X, self.ref_rs, C
 
+    def calculate_anisotropy_heatmap(self, lag_floor=None, two_sided=None):
+        """Return ``(X, Y, C)`` for the ``S_2_phi / S_2_r`` anisotropy heatmap.
+
+        Compares the azimuthal and radial structure functions at the same
+        *arcsec* lag, per reference annulus. For an isotropic field the
+        ratio is 1 at every lag; for an anisotropy
+        ``A = ell_phi / ell_r`` it asymptotes to ``1/A^2`` at small lag
+        (where both ``S_2`` grow as ``L^2/ell^2``) and to 1 at large lag
+        (both reach the ``2 sigma^2`` plateau). So the small-lag value of
+        the ratio is a direct, quantitative anisotropy estimator (a
+        ratio < 1 means azimuthally-elongated structure, > 1 means
+        radially-elongated).
+
+        The azimuthal slice is evaluated as an arclength (``r_ref * dphi``)
+        and interpolated, per ``ref_r``, onto the radial lag axis so the
+        two ``S_2`` are compared at the same physical lag.
+
+        Args:
+            lag_floor (Optional[float]): Mask bins with ``|L| <= lag_floor``
+                to avoid the 0/0 column at zero lag (both ``S_2`` vanish
+                there). Defaults to half a radial bin.
+            two_sided (Optional[bool]): As in
+                :meth:`calculate_radial_heatmap`. ``None`` (default)
+                follows :attr:`symmetrized`: one-sided for symmetric
+                results, two-sided otherwise. In the two-sided case the
+                azimuthal slice is evaluated at ``|L|`` so both signs of
+                ``dr`` share the same azimuthal normalisation; any L/R
+                asymmetry in the ratio then comes from the radial
+                outward/inward statistics (i.e. non-stationarity).
+
+        Returns:
+            X (ndarray): Radial lag axis [arcsec] — 1D ``(2*mlx+1,)``
+                if ``two_sided``, else ``(mlx+1,)``.
+            Y (ndarray): ``ref_rs``, 1D ``(N_ref,)`` in arcsec.
+            C (ndarray): The anisotropy ratio, shape ``(N_ref, len(X))``,
+                with ``np.nan`` where ``|L| <= lag_floor``.
+        """
+        if two_sided is None:
+            two_sided = not self.symmetrized
+
+        Xa, _, Ca = self.calculate_azimuthal_heatmap(arclength=True)
+        Xr, _, Cr = self.calculate_radial_heatmap(two_sided=two_sided)
+
+        # Azimuthal S2 is intrinsically positive-lag; evaluate at |L| so
+        # both signs of dr (when two-sided) share the same azimuthal
+        # normalisation. Out-of-range -> NaN.
+        Ca_on_Xr = np.array([np.interp(np.abs(Xr), Xa[i], Ca[i],
+                                       left=np.nan, right=np.nan)
+                             for i in range(Ca.shape[0])])
+
+        if lag_floor is None:
+            lag_floor = 0.5 * float(np.median(np.diff(Xr)))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ratio = np.where(np.abs(Xr)[None, :] > lag_floor,
+                             Ca_on_Xr / Cr, np.nan)
+        return Xr, self.ref_rs, ratio
+
     def plot_azimuthal_heatmap(self, ax=None, return_fig=False,
                                arclength=False, normalize=None,
                                **pcolormesh_kwargs):
@@ -1286,6 +1343,42 @@ class StructureFunction2DStack:
         cbar = fig.colorbar(pcm, ax=ax, pad=0.02)
         cbar.ax.set_ylabel(self._heatmap_normalize_label(normalize),
                         rotation=270, labelpad=13)
+        return fig if return_fig else None
+
+    def plot_anisotropy_heatmap(self, ax=None, return_fig=False,
+                                lag_floor=None, two_sided=None,
+                                **pcolormesh_kwargs):
+        """Heatmap of ``S_2_phi / S_2_r`` vs ``(ref_r, lag)``. Thin
+        wrapper around :meth:`calculate_anisotropy_heatmap`.
+
+        A direct anisotropy diagnostic: ratio < 1 indicates
+        azimuthally-elongated structure (``ell_phi > ell_r``), > 1
+        radially-elongated. The small-lag value asymptotes to ``1/A^2``.
+
+        Args:
+            lag_floor (Optional[float]): See
+                :meth:`calculate_anisotropy_heatmap`.
+            two_sided (Optional[bool]): See
+                :meth:`calculate_anisotropy_heatmap`.
+        """
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure
+
+        X, Y, C = self.calculate_anisotropy_heatmap(lag_floor=lag_floor,
+                                                    two_sided=two_sided)
+
+        kwargs = dict(shading="auto", rasterized=True)
+        kwargs.update(pcolormesh_kwargs)
+        pcm = ax.pcolormesh(X, Y, C, **kwargs)
+        ax.set_xlabel(r"$\ell$ (arcsec)")
+        ax.set_ylabel(r"$r_{\rm ref}$ (arcsec)")
+        cbar = fig.colorbar(pcm, ax=ax, pad=0.02)
+        cbar.ax.set_ylabel(r"$S_2^\phi / S_2^r$",
+                           rotation=270, labelpad=13)
         return fig if return_fig else None
 
     def plot_gridded(self, ax=None, return_fig=False,
