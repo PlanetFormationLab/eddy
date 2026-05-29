@@ -1557,10 +1557,16 @@ class rotationmap(momentmap):
         dvprs = ((rvals - r_p) / r_p) * dvprs + 1.0
         vkep = jnp.where(rvals <= r_p, vkep, vkep[idx] * dvprs)
         vkep = jnp.clip(vkep, 0.0, None)
-        if params['w_pressure'] > 0.0:
-            taper = (rvals - r_p) / params['w_pressure']
-            taper = jnp.exp(-jnp.power(taper, 2.0))
-            vkep *= jnp.where(rvals <= r_p, 1.0, taper)
+        # ``w_pressure`` may be a traced (fitted) parameter, so the
+        # taper-vs-no-taper choice must use ``jnp.where`` rather than a
+        # Python ``if`` -- the latter raises TracerBoolConversionError under
+        # the JIT/vmap path built in ``_build_vectorized_ln_probability``.
+        # Guard the denominator so the untaken (w<=0) branch stays finite.
+        w = params['w_pressure']
+        taper = (rvals - r_p) / jnp.where(w > 0.0, w, 1.0)
+        taper = jnp.exp(-jnp.power(taper, 2.0))
+        taper = jnp.where(rvals <= r_p, 1.0, taper)
+        vkep = vkep * jnp.where(w > 0.0, taper, 1.0)
         return vkep
 
     def _vpow(self, rvals, tvals, zvals, params):
@@ -1575,10 +1581,13 @@ class rotationmap(momentmap):
         idx = jnp.unravel_index(jnp.argmin(jnp.abs(rvals - r_p)), rvals.shape)
         dvprs = ((rvals - r_p) / r_p) * params['vp_q'] + 1.0
         vpow = jnp.where(rvals <= r_p, vpow, vpow[idx] * dvprs)
-        if params['w_pressure'] > 0.0:
-            taper = (rvals - r_p) / params['w_pressure']
-            taper = jnp.exp(-jnp.power(taper, 2.0))
-            vpow *= jnp.where(rvals <= r_p, 1.0, taper)
+        # See ``_vkep_pressure``: ``jnp.where`` (not a Python ``if``) so a
+        # fitted ``w_pressure`` traces cleanly under JIT/vmap.
+        w = params['w_pressure']
+        taper = (rvals - r_p) / jnp.where(w > 0.0, w, 1.0)
+        taper = jnp.exp(-jnp.power(taper, 2.0))
+        taper = jnp.where(rvals <= r_p, 1.0, taper)
+        vpow = vpow * jnp.where(w > 0.0, taper, 1.0)
         return vpow
 
 

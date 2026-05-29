@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] – 2026-05-29
+
+### Fixed
+- **`TracerBoolConversionError` in the pressure-corrected velocity
+  profiles.** `_vkep_pressure` and `_vpow_pressure` selected the
+  pressure taper with a Python `if params['w_pressure'] > 0.0:`, which
+  cannot be traced when `w_pressure` is a free parameter under the
+  JIT/`vmap` log-posterior built in `_build_vectorized_ln_probability`
+  (the default single-process `fit_map` path). The branch now uses
+  `jnp.where` with a guarded denominator, so a fitted `w_pressure`
+  traces and differentiates cleanly while preserving the previous
+  behaviour (no taper for `w_pressure <= 0`).
+
 ## [3.0.0] – 2026-05-13
 
 A major refactor centred on a JAX-backed model, a new class hierarchy,
