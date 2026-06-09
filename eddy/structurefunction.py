@@ -40,7 +40,15 @@ __all__ = [
     "setup_lag_coords",
     "extract_basic_profiles",
     "combine_s2_weighted",
+    "structure_function_ensemble",
     "gaussian_beam_s2",
+    "grf_s2_slices",
+    "ell_r",
+    "ell_phi",
+    "predict_s2_slices",
+    "predict_s2_2d",
+    "predict_spiral_s2_slices",
+    "predict_spiral_s2_2d",
     "S2phi",
     "S2phi_singlemodel",
 ]
@@ -517,6 +525,599 @@ def _make_spiral_model(modes):
     return model
 
 
+# -- ANISOTROPIC GAUSSIAN RANDOM FIELD MODEL -- #
+#
+# Theoretical S_2 for the non-stationary, anisotropic Gaussian random field
+# whose radial correlation length is ell_r(r) = ell0 (r/r0)**alpha and whose
+# azimuthal (arc-length) correlation length is ell_phi = A ell_r. The
+# covariance is the Paciorek & Schervish (2006) non-stationary kernel, the
+# unique smooth, positive-definite extension that reduces exactly to
+#   C(dr, dphi) = sigma^2 exp(-dr^2 / 2 ell_r^2 - (r dphi)^2 / 2 ell_phi^2)
+# whenever the two points share a radius. A ``pitch`` angle tilts the local
+# anisotropy ellipse toward the radial direction (flocculent, random-phase
+# spiral arms). These are the forward models fit by
+# :meth:`StructureFunction2DStack.fit_GRF`; a coherent grand-design spiral is
+# instead a deterministic mean (see :func:`predict_spiral_s2_slices`).
+
+
+def ell_r(r, ell0r=1.0, alphar=1.0, r0=1.0):
+    """Radial correlation length ``ell0r * (r / r0)**alphar`` [arcsec]."""
+    return ell0r * (np.asarray(r, dtype=float) / r0) ** alphar
+
+
+def ell_phi(r, ell0phi=1.0, alphaphi=1.0, r0=1.0):
+    """Azimuthal correlation length (arc length) ``ell0phi * (r / r0)**alphaphi``
+    [arcsec].
+
+    Parametrised independently of the radial scale: its own normalisation
+    ``ell0phi = ell_phi(r0)`` and radial exponent ``alphaphi``. The
+    (radius-dependent) anisotropy is the derived ratio
+    ``A(r) = ell_phi(r) / ell_r(r) = (ell0phi/ell0r) (r/r0)**(alphaphi - alphar)``,
+    constant only when ``alphaphi == alphar``. ``ell_phi`` is a physical arc
+    length (the azimuthal kernel term is ``(r dphi)^2``).
+    """
+    return ell0phi * (np.asarray(r, dtype=float) / r0) ** alphaphi
+
+
+def _resolve_phi(ell0r, alphar, ell0phi, alphaphi):
+    """Fill in azimuthal correlation-length params from the radial ones.
+
+    ``ell0phi`` / ``alphaphi`` default to ``ell0r`` / ``alphar`` when ``None``,
+    recovering an isotropic, radius-independent-anisotropy field (``A = 1`` at
+    all radii). Pass either to decouple the azimuthal amplitude and/or slope.
+    """
+    if ell0phi is None:
+        ell0phi = ell0r
+    if alphaphi is None:
+        alphaphi = alphar
+    return ell0phi, alphaphi
+
+
+# -- GRF FIT SAMPLING SPEC -- #
+#
+# The GRF fits sample a subset of (sigma, alphar, ell0r, ell0phi, alphaphi,
+# pitch, s) depending on configuration. ``sigma``/``ell0r``/``ell0phi``/``s``
+# are sampled in natural log (kept positive); ``alphar``/``alphaphi``/``pitch``
+# are linear. ``alphaphi`` is only sampled when ``fit_alphaphi=True`` (otherwise
+# tied to ``alphar`` for a radius-independent anisotropy); ``pitch`` only for the
+# global pitched fit; ``s`` (jitter) only with ``jitter=True`` and always last.
+# A single ordered key list drives bounds/priors/labels/unpacking so they all
+# stay aligned regardless of which optional dimensions are active.
+
+_GRF_LOG_SAMPLED = frozenset({"sigma", "ell0r", "ell0phi", "s"})
+_GRF_BOUND_DEFAULTS = {
+    "sigma": (1e-3, 1e3), "alphar": (-5.0, 5.0), "ell0r": (1e-4, 1e2),
+    "ell0phi": (1e-4, 1e2), "alphaphi": (-5.0, 5.0), "pitch": (-89.0, 89.0),
+    "s": (1e-3, 1e3),
+}
+_GRF_LABELS = {
+    "sigma": (r"$\log\sigma$", r"$\sigma$"),
+    "alphar": (r"$\alpha_r$", r"$\alpha_r$"),
+    "ell0r": (r"$\log\ell_{0r}$", r"$\ell_{0r}$"),
+    "ell0phi": (r"$\log\ell_{0\phi}$", r"$\ell_{0\phi}$"),
+    "alphaphi": (r"$\alpha_\phi$", r"$\alpha_\phi$"),
+    "pitch": (r"$\mathrm{pitch}$", r"$\mathrm{pitch}$"),
+    "s": (r"$\log s$", r"$s$"),
+}
+
+
+def _grf_sample_keys(*, pitch=False, fit_alphaphi=False, jitter=False):
+    """Ordered sampled-parameter keys for a GRF fit (see module note above)."""
+    keys = ["sigma", "alphar", "ell0r", "ell0phi"]
+    if fit_alphaphi:
+        keys.append("alphaphi")
+    if pitch:
+        keys.append("pitch")
+    if jitter:
+        keys.append("s")
+    return keys
+
+
+def _grf_unpack(theta, keys):
+    """Sampling vector -> linear model-parameter dict.
+
+    Exponentiates the log-sampled entries and ties ``alphaphi`` to ``alphar``
+    when it is not itself sampled, so every GRF residual / log-likelihood
+    closure can call the forward model parameterisation-agnostically.
+    """
+    d = {}
+    for k, v in zip(keys, theta):
+        d[k] = float(np.exp(v)) if k in _GRF_LOG_SAMPLED else float(v)
+    d.setdefault("alphaphi", d["alphar"])
+    return d
+
+
+def _grf_x0(keys, est):
+    """Initial sampling vector from a dict of linear-space estimates ``est``.
+
+    Log-sampled keys are stored as ``log(est[k])``; ``s`` seeds at ``0`` (so
+    ``s = 1``); a missing linear key (e.g. ``pitch``) seeds at ``0``.
+    """
+    x0 = []
+    for k in keys:
+        if k == "s":
+            x0.append(0.0)
+        elif k in _GRF_LOG_SAMPLED:
+            x0.append(np.log(est[k]))
+        else:
+            x0.append(float(est.get(k, 0.0)))
+    return np.array(x0, dtype=float)
+
+
+def _grf_bounds_from_keys(keys, bounds):
+    """``(lo, hi)`` sampling-space flat-prior bounds aligned to ``keys``.
+
+    ``bounds`` overrides the linear-space defaults per key (``jitter`` is
+    accepted as an alias for ``s``).
+    """
+    b = dict(_GRF_BOUND_DEFAULTS)
+    if bounds:
+        bb = dict(bounds)
+        if "jitter" in bb:
+            bb["s"] = bb.pop("jitter")
+        b.update(bb)
+    lo, hi = [], []
+    for k in keys:
+        x0, x1 = b[k]
+        if k in _GRF_LOG_SAMPLED:
+            lo.append(np.log(x0))
+            hi.append(np.log(x1))
+        else:
+            lo.append(float(x0))
+            hi.append(float(x1))
+    return np.array(lo), np.array(hi)
+
+
+def _grf_prior_arrays_from_keys(keys, priors):
+    """Gaussian log-prior ``(mu, sd)`` in sampling space, aligned to ``keys``.
+
+    ``priors`` maps a key to a ``(mu, sigma)`` Gaussian in *sampling* space
+    (natural-log for ``sigma``/``ell0r``/``ell0phi``/``s``, linear for
+    ``alphar``/``alphaphi``/``pitch``); omitted keys get infinite width (flat
+    within :func:`_grf_bounds_from_keys`). ``jitter`` aliases ``s``.
+    """
+    mu = np.zeros(len(keys))
+    sd = np.full(len(keys), np.inf)
+    if priors:
+        pp = dict(priors)
+        if "jitter" in pp:
+            pp["s"] = pp.pop("jitter")
+        for k, (m, s) in pp.items():
+            if k not in keys:
+                raise ValueError(
+                    "Unknown prior key {!r}; expected {}.".format(k, keys))
+            i = keys.index(k)
+            mu[i], sd[i] = float(m), float(s)
+    return mu, sd
+
+
+def _grf_perr(keys, mp, cov):
+    """Formal 1-sigma errors in linear space from the sampling-space ``cov``.
+
+    Log-sampled params propagate as ``value * sqrt(cov_ii)``; linear params are
+    ``sqrt(cov_ii)``. ``mp`` is the unpacked linear-parameter dict.
+    """
+    perr = {}
+    for i, k in enumerate(keys):
+        sd = np.sqrt(cov[i, i])
+        perr[k] = mp[k] * sd if k in _GRF_LOG_SAMPLED else sd
+    return perr
+
+
+def _grf_labels(keys):
+    """``(log_labels, lin_labels)`` for corner/walker plots, aligned to ``keys``."""
+    return ([_GRF_LABELS[k][0] for k in keys],
+            [_GRF_LABELS[k][1] for k in keys])
+
+
+def _sigma_components(lr, lphi, pitch):
+    """Components of the local anisotropy (kernel covariance) matrix Sigma.
+
+    ``Sigma = R(p) diag(2 ell_perp^2, 2 ell_par^2) R(p)^T`` in the local
+    ``(dr, r dphi)`` tangent frame, with the long axis ``ell_par = ell_phi``
+    along the arm (pitch ``p`` from the azimuthal direction) and the short
+    axis ``ell_perp = ell_r`` across it. ``lr`` and ``lphi`` are the radial and
+    azimuthal correlation lengths *at this point*, supplied independently (their
+    ratio is the local anisotropy). Returns the three independent entries
+    ``(s11, s22, s12)``; ``pitch=0`` gives ``s12=0`` and the diagonal
+    ``(2 ell_r^2, 2 ell_phi^2)``.
+    """
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    lperp2 = lr ** 2
+    lpar2 = lphi ** 2
+    s11 = 2.0 * (lperp2 * cp ** 2 + lpar2 * sp ** 2)
+    s22 = 2.0 * (lperp2 * sp ** 2 + lpar2 * cp ** 2)
+    s12 = 2.0 * sp * cp * (lpar2 - lperp2)
+    return s11, s22, s12
+
+
+def _ps_cov(r_a, phi_a, r_b, phi_b, *, alphar, ell0r, alphaphi, ell0phi,
+            sigma, r0, pitch=0.0):
+    """Paciorek-Schervish covariance between point sets ``a`` and ``b``.
+
+    Uses the full 2x2 anisotropy form so the correlation ellipse can be tilted
+    to a pitch angle (``pitch`` in radians). The radial and azimuthal
+    correlation lengths are evaluated per point from their independent power
+    laws. All four coordinate inputs broadcast against each other. ``pitch=0``
+    recovers the diagonal kernel.
+    """
+    lr_a = ell_r(r_a, ell0r, alphar, r0)
+    lr_b = ell_r(r_b, ell0r, alphar, r0)
+    lp_a = ell_phi(r_a, ell0phi, alphaphi, r0)
+    lp_b = ell_phi(r_b, ell0phi, alphaphi, r0)
+    s11a, s22a, s12a = _sigma_components(lr_a, lp_a, pitch)
+    s11b, s22b, s12b = _sigma_components(lr_b, lp_b, pitch)
+
+    # Averaged anisotropy matrix Sigma_bar = (Sigma_a + Sigma_b) / 2.
+    a = 0.5 * (s11a + s11b)
+    d = 0.5 * (s22a + s22b)
+    b = 0.5 * (s12a + s12b)
+    det = a * d - b ** 2
+
+    # Displacement (dr, rbar dphi) in the shared tangent frame.
+    dphi = phi_a - phi_b
+    dphi = (dphi + np.pi) % (2.0 * np.pi) - np.pi  # wrap to [-pi, pi]
+    D1 = r_a - r_b
+    D2 = 0.5 * (r_a + r_b) * dphi
+
+    # Quadratic form D^T Sigma_bar^{-1} D and the det prefactor.
+    Q = (d * D1 ** 2 - 2.0 * b * D1 * D2 + a * D2 ** 2) / det
+    det_a = s11a * s22a - s12a ** 2
+    det_b = s11b * s22b - s12b ** 2
+    pref = det_a ** 0.25 * det_b ** 0.25 / np.sqrt(det)
+    return sigma ** 2 * pref * np.exp(-Q)
+
+
+def _spiral_pitch_wavenumber(m, pitch_angle):
+    """Radial phase wavenumber ``p = m / tan(pitch_angle)`` (phase per d ln r).
+
+    ``pitch_angle`` [deg] is the angle between an arm's tangent and the local
+    azimuthal direction. ``90 deg`` -> ``p = 0`` (radial spokes, no winding);
+    small angles -> tightly wound. ``0`` is rejected (an unwound circle).
+    """
+    if m < 1:
+        raise ValueError("m must be a positive integer (>= 1).")
+    if pitch_angle == 0.0:
+        raise ValueError(
+            "pitch_angle must be nonzero (0 deg is a closed ring, p -> inf); "
+            "use 90 deg for the no-winding limit.")
+    return m / np.tan(np.radians(pitch_angle))
+
+
+def _spiral_envelope(envelope, r):
+    """Evaluate a radial amplitude envelope ``B(r) / amplitude`` on ``r``.
+
+    ``None`` -> constant 1. Otherwise a callable ``r -> factor``.
+    """
+    r = np.asarray(r, dtype=float)
+    if envelope is None:
+        return np.ones_like(r)
+    if not callable(envelope):
+        raise TypeError(
+            "envelope must be a callable r -> amplitude factor, or None.")
+    return np.broadcast_to(np.asarray(envelope(r), dtype=float), r.shape)
+
+
+def _spiral_s2(r_a, r_b, dphi, *, m, p, amplitude, r0, envelope):
+    """Azimuthally-averaged S_2 of the deterministic spiral between two radii.
+
+    For ``mu = B(r) cos(m phi - p ln(r/r0) - const)``, averaging the squared
+    increment over base azimuth gives, exactly,
+    ``(B_a^2 + B_b^2)/2 - B_a B_b cos(m dphi - p ln(r_b/r_a))``, independent of
+    the pattern phase. On the azimuthal slice (``r_a = r_b``) this reduces to
+    ``B^2 (1 - cos m dphi)`` (oscillating, non-saturating).
+    """
+    Ba = amplitude * _spiral_envelope(envelope, r_a)
+    Bb = amplitude * _spiral_envelope(envelope, r_b)
+    dpsi = p * np.log(r_b / r_a)
+    return 0.5 * (Ba ** 2 + Bb ** 2) - Ba * Bb * np.cos(m * dphi - dpsi)
+
+
+def predict_spiral_s2_slices(ref_r, lags_r, lags_phi_deg, *, m, pitch_angle,
+                             amplitude=1.0, r0=1.0, envelope=None):
+    """Deterministic grand-design contribution to the ``S_2`` slices.
+
+    The expected ``S_2`` of a coherent logarithmic-spiral mean field alone,
+    azimuthally averaged, on the same lag axes as :func:`predict_s2_slices`.
+    Add to the GRF prediction (or pass via its ``spiral=`` kwarg) for the full
+    expected field-plus-spiral ``S_2``.
+
+    Args:
+        ref_r (float): Reference annulus radius [arcsec].
+        lags_r (ndarray): Radial lags [arcsec], >= 0 (outward).
+        lags_phi_deg (ndarray): Azimuthal lags [deg].
+        m (int): Azimuthal wavenumber / number of arms (>= 1).
+        pitch_angle (float): Pitch angle [deg]; the arm tangent's lean from the
+            azimuthal direction (``90`` is no winding). Must be nonzero.
+        amplitude (float): Peak amplitude ``B``.
+        r0 (float): Reference radius [arcsec] for the radial phase.
+        envelope (Optional[callable]): ``r -> amplitude factor`` radial taper;
+            ``None`` (default) is constant.
+
+    Returns:
+        dict with keys ``S2_r`` (radial slice, ``dphi=0``; oscillates with
+        ``ln r`` and does *not* saturate), ``S2_phi`` (azimuthal slice,
+        ``dr=0``, equal to ``B(ref_r)^2 (1 - cos m dphi)``), ``B_ref`` (the
+        amplitude at ``ref_r``) and ``p`` (the radial phase wavenumber).
+    """
+    lags_r = np.asarray(lags_r, dtype=float)
+    lags_phi_deg = np.asarray(lags_phi_deg, dtype=float)
+    m = int(m)
+    p = _spiral_pitch_wavenumber(m, pitch_angle)
+    kw = dict(m=m, p=p, amplitude=amplitude, r0=r0, envelope=envelope)
+
+    S2_r = _spiral_s2(ref_r, ref_r + lags_r, 0.0, **kw)
+    S2_phi = _spiral_s2(ref_r, ref_r, np.radians(lags_phi_deg), **kw)
+
+    return {
+        "S2_r": S2_r,
+        "S2_phi": S2_phi,
+        "B_ref": float(amplitude * _spiral_envelope(envelope, ref_r)),
+        "p": float(p),
+    }
+
+
+def predict_spiral_s2_2d(ref_r, lags_r_full, lags_phi_full_deg, *, m,
+                         pitch_angle, amplitude=1.0, r0=1.0, envelope=None):
+    """Deterministic grand-design 2D ``S_2`` surface, on a two-sided lag grid.
+
+    The expected ``S_2`` of a coherent spiral mean field alone, on the same
+    axes as :func:`predict_s2_2d`. Its trough runs along
+    ``m dphi = p ln(r_b / r_a)`` -- the coherent winding ridge. Pairs whose
+    partner radius ``ref_r + l_r <= 0`` are set to NaN.
+
+    Args:
+        ref_r (float): Reference annulus radius [arcsec].
+        lags_r_full (ndarray): Two-sided radial lags [arcsec].
+        lags_phi_full_deg (ndarray): Two-sided azimuthal lags [deg].
+        m, pitch_angle, amplitude, r0, envelope: Spiral parameters (see
+            :func:`predict_spiral_s2_slices`).
+
+    Returns:
+        ndarray: 2D ``S_2``, shape
+        ``(lags_r_full.size, lags_phi_full_deg.size)``.
+    """
+    lags_r_full = np.asarray(lags_r_full, dtype=float)
+    lags_phi_full_deg = np.asarray(lags_phi_full_deg, dtype=float)
+    m = int(m)
+    p = _spiral_pitch_wavenumber(m, pitch_angle)
+
+    LR, LP = np.meshgrid(lags_r_full, np.radians(lags_phi_full_deg),
+                         indexing="ij")
+    r_b = ref_r + LR
+    # No pairs exist past the disc centre; mask so the log/envelope stay finite.
+    r_b_safe = np.where(r_b > 0.0, r_b, np.nan)
+    return _spiral_s2(ref_r, r_b_safe, LP, m=m, p=p, amplitude=amplitude,
+                      r0=r0, envelope=envelope)
+
+
+def predict_s2_slices(ref_r, lags_r, lags_phi_deg, *, alphar=1.0, ell0r=1.0,
+                      alphaphi=None, ell0phi=None, sigma=1.0, r0=1.0,
+                      pitch=0.0, spiral=None):
+    """Expected ``S_2`` radial and azimuthal slices at a reference annulus.
+
+    For a Gaussian field, ``S_2(a, b) = C(a, a) + C(b, b) - 2 C(a, b)
+    = 2 sigma^2 - 2 C(a, b)``, evaluated with the same Paciorek-Schervish
+    covariance the field is drawn from, so the prediction is *exact* for the
+    on-axis slices -- including the radial slice, whose pairs straddle two
+    radii with different correlation lengths. The lag axes match
+    :class:`StructureFunction2D`: ``lags_r`` in arcsec (its ``lags_x`` /
+    ``S2_x``) and ``lags_phi_deg`` in degrees (its ``lags_y`` / ``S2_y``).
+
+    With ``pitch != 0`` the correlation ellipse is tilted; the on-axis slices
+    still match in shape, but the clearest tilt signature is the diagonal ridge
+    in the full 2D surface -- use :func:`predict_s2_2d`.
+
+    This is the forward model fit by
+    :meth:`StructureFunction2DStack.fit_GRF` (which fits ``pitch=0``,
+    ``spiral=None``); :func:`grf_s2_slices` is the convenience entry point for
+    that common case.
+
+    Args:
+        ref_r (float): Reference annulus radius [arcsec].
+        lags_r (ndarray): Radial lags [arcsec], >= 0 (outward).
+        lags_phi_deg (ndarray): Azimuthal lags [deg], >= 0.
+        alphar (float): Radial scaling exponent of ``ell_r``.
+        ell0r (float): Radial correlation length at ``r0`` [arcsec].
+        alphaphi (Optional[float]): Azimuthal scaling exponent of ``ell_phi``.
+            Defaults to ``alphar`` (radius-independent anisotropy).
+        ell0phi (Optional[float]): Azimuthal (arc-length) correlation length at
+            ``r0`` [arcsec]. Defaults to ``ell0r`` (isotropic). The anisotropy
+            ``ell_phi/ell_r`` is then a derived, possibly radius-dependent ratio.
+        sigma (float): Per-point standard deviation (plateau is ``2 sigma^2``).
+        r0 (float): Reference radius for both correlation-length power laws.
+        pitch (float): Pitch angle [deg] of the correlation ellipse.
+        spiral (Optional[dict]): If given, the deterministic grand-design
+            contribution from :func:`predict_spiral_s2_slices` is added to both
+            slices (the field and a deterministic mean add in expectation).
+            Keys are that function's keyword args (``m``, ``pitch_angle``,
+            ``amplitude``, ``r0``, ``envelope``).
+
+    Returns:
+        dict with keys ``S2_r`` (radial slice aligned with ``lags_r``),
+        ``S2_phi`` (azimuthal slice aligned with ``lags_phi_deg``), ``ell_r``
+        and ``ell_phi`` at ``ref_r`` [arcsec], and ``plateau`` (``2 sigma^2``,
+        the GRF large-lag asymptote; the spiral part does not saturate).
+    """
+    ell0phi, alphaphi = _resolve_phi(ell0r, alphar, ell0phi, alphaphi)
+    lags_r = np.asarray(lags_r, dtype=float)
+    lags_phi_deg = np.asarray(lags_phi_deg, dtype=float)
+    params = dict(alphar=alphar, ell0r=ell0r, alphaphi=alphaphi,
+                  ell0phi=ell0phi, sigma=sigma, r0=r0,
+                  pitch=np.radians(pitch))
+
+    # Radial slice: pairs (ref_r, 0) and (ref_r + lag, 0) at different radii.
+    cov_r = _ps_cov(ref_r, 0.0, ref_r + lags_r, 0.0, **params)
+    S2_r = 2.0 * sigma ** 2 - 2.0 * cov_r
+
+    # Azimuthal slice: pairs (ref_r, 0) and (ref_r, dphi) at the same radius.
+    dphi_rad = np.radians(lags_phi_deg)
+    cov_phi = _ps_cov(ref_r, 0.0, ref_r, dphi_rad, **params)
+    S2_phi = 2.0 * sigma ** 2 - 2.0 * cov_phi
+
+    if spiral is not None:
+        sp = predict_spiral_s2_slices(ref_r, lags_r, lags_phi_deg, **spiral)
+        S2_r = S2_r + sp["S2_r"]
+        S2_phi = S2_phi + sp["S2_phi"]
+
+    return {
+        "S2_r": S2_r,
+        "S2_phi": S2_phi,
+        "ell_r": float(ell_r(ref_r, ell0r, alphar, r0)),
+        "ell_phi": float(ell_phi(ref_r, ell0phi, alphaphi, r0)),
+        "plateau": 2.0 * sigma ** 2,
+    }
+
+
+def predict_s2_2d(ref_r, lags_r_full, lags_phi_full_deg, *, alphar=1.0,
+                  ell0r=1.0, alphaphi=None, ell0phi=None, sigma=1.0, r0=1.0,
+                  pitch=0.0, spiral=None):
+    """Expected 2D ``S_2`` surface at a reference annulus, on a two-sided grid.
+
+    ``S_2 = 2 sigma^2 - 2 C`` between ``(ref_r, 0)`` and
+    ``(ref_r + l_r, l_phi)`` using the same Paciorek-Schervish covariance the
+    field is drawn from. With ``pitch != 0`` the trough (max correlation) runs
+    along a diagonal in the ``(l_r, l_phi)`` plane.
+
+    Pass two-sided lag axes matching
+    :attr:`StructureFunction2D.S2`: ``lags_r_full`` = ``S2.lags_x_full``
+    [arcsec] and ``lags_phi_full_deg`` =
+    ``np.arange(-S2.max_lag_y, S2.max_lag_y + 1) * S2.dy`` [deg].
+
+    Args:
+        ref_r (float): Reference annulus radius [arcsec].
+        lags_r_full (ndarray): Two-sided radial lags [arcsec].
+        lags_phi_full_deg (ndarray): Two-sided azimuthal lags [deg].
+        alphar, ell0r, alphaphi, ell0phi, sigma, r0, pitch (float): Field
+            parameters. ``alphaphi`` / ``ell0phi`` default to ``alphar`` /
+            ``ell0r`` (isotropic).
+        spiral (Optional[dict]): If given, adds the deterministic grand-design
+            surface from :func:`predict_spiral_s2_2d`. Keys are that function's
+            keyword args.
+
+    Returns:
+        ndarray: 2D ``S_2``, shape
+        ``(lags_r_full.size, lags_phi_full_deg.size)``.
+    """
+    ell0phi, alphaphi = _resolve_phi(ell0r, alphar, ell0phi, alphaphi)
+    lags_r_full = np.asarray(lags_r_full, dtype=float)
+    lags_phi_full_deg = np.asarray(lags_phi_full_deg, dtype=float)
+    LR, LP = np.meshgrid(lags_r_full, np.radians(lags_phi_full_deg),
+                         indexing="ij")
+    cov = _ps_cov(ref_r, 0.0, ref_r + LR, LP, alphar=alphar, ell0r=ell0r,
+                  alphaphi=alphaphi, ell0phi=ell0phi, sigma=sigma,
+                  r0=r0, pitch=np.radians(pitch))
+    S2 = 2.0 * sigma ** 2 - 2.0 * cov
+
+    if spiral is not None:
+        S2 = S2 + predict_spiral_s2_2d(ref_r, lags_r_full, lags_phi_full_deg,
+                                       **spiral)
+    return S2
+
+
+def grf_s2_slices(ref_r, lags_r, lags_phi_deg, *, sigma=1.0, alphar=1.0,
+                  ell0r=1.0, alphaphi=None, ell0phi=None, r0=1.0):
+    """Expected ``S_2`` slices for the axis-aligned (zero-pitch) GRF.
+
+    Convenience wrapper around :func:`predict_s2_slices` for the common case
+    fit by :meth:`StructureFunction2DStack.fit_GRF`: an anisotropic Gaussian
+    random field with radial correlation length
+    ``ell_r(r) = ell0r (r/r0)**alphar`` and azimuthal (arc-length) length
+    ``ell_phi(r) = ell0phi (r/r0)**alphaphi``, no pitch and no deterministic
+    spiral. See :func:`predict_s2_slices` for the general form.
+
+    Args:
+        ref_r (float): Reference annulus radius [arcsec].
+        lags_r (ndarray): Radial lags [arcsec], >= 0 (outward).
+        lags_phi_deg (ndarray): Azimuthal lags [deg], >= 0.
+        sigma (float): Per-point standard deviation (plateau is ``2 sigma^2``).
+        alphar (float): Radial scaling exponent of ``ell_r``.
+        ell0r (float): Radial correlation length at ``r0`` [arcsec].
+        alphaphi (Optional[float]): Azimuthal scaling exponent; defaults to
+            ``alphar`` (radius-independent anisotropy).
+        ell0phi (Optional[float]): Azimuthal (arc-length) correlation length at
+            ``r0`` [arcsec]; defaults to ``ell0r`` (isotropic).
+        r0 (float): Reference radius for both correlation-length power laws.
+
+    Returns:
+        dict with keys ``S2_r``, ``S2_phi``, ``ell_r``, ``ell_phi``,
+        ``plateau`` (see :func:`predict_s2_slices`).
+    """
+    return predict_s2_slices(ref_r, lags_r, lags_phi_deg, alphar=alphar,
+                             ell0r=ell0r, alphaphi=alphaphi, ell0phi=ell0phi,
+                             sigma=sigma, r0=r0, pitch=0.0, spiral=None)
+
+
+def grf_s2_2d_global(r_axis, lags_x, lags_y_deg, *, sigma=1.0, alphar=1.0,
+                     ell0r=1.0, alphaphi=None, ell0phi=None, r0=1.0, pitch=0.0):
+    """Expected GLOBAL-mode (``ref_i=-1``) 2D ``S_2`` surface of the pitched GRF.
+
+    The global estimator averages the pair statistic over *every* base radius,
+    so the expected surface is the (equal-weight-per-base-row) mean over base
+    radius ``r_i`` of the single-pair surface ``2 sigma^2 - 2 C(r_i -> r_i +
+    l_r, l_phi)``, with ``C`` the Paciorek-Schervish covariance
+    (:func:`_ps_cov`, the same kernel :func:`predict_s2_2d` uses).
+
+    This is the surface to fit a pitch against. The per-annulus
+    (reference-mode) surface that :class:`StructureFunction2DStack` builds
+    mirror-fills the azimuthal lag and is therefore *exactly* symmetric in
+    ``l_phi``, which averages the antisymmetric pitch ridge -- and with it the
+    pitch sign -- away. The global surface is only point-symmetric
+    (``(l_r, l_phi) -> (-l_r, -l_phi)``) and preserves the ridge. See
+    :meth:`StructureFunction2D.fit_GRF_pitch`.
+
+    Equal weight per valid base row matches the global kernel's pair counts on
+    a rectangular polar grid: lag bin ``(di, dj)`` accumulates
+    ``(N - |di|) * (M - |dj|)`` pairs, uniform across the ``N - |di|`` valid
+    base rows, and the ``(M - |dj|)`` azimuthal factor cancels in the per-bin
+    average.
+
+    Args:
+        r_axis (ndarray): Absolute radii [arcsec] of axis 0 of the field this
+            ``S_2`` was computed from (ascending, uniform spacing). Sets which
+            base radii enter the average and the radial scaling of ``ell_r``.
+        lags_x (ndarray): Two-sided radial lags [arcsec], i.e.
+            :attr:`StructureFunction2D.lags_x_full`.
+        lags_y_deg (ndarray): Two-sided azimuthal lags [deg].
+        sigma (float): Per-point standard deviation (plateau is ``2 sigma^2``).
+        alphar (float): Radial scaling exponent of ``ell_r``.
+        ell0r (float): ``ell_r(r0) = ell0r`` [arcsec].
+        alphaphi (Optional[float]): Azimuthal scaling exponent; defaults to
+            ``alphar``.
+        ell0phi (Optional[float]): Azimuthal (arc-length) length at ``r0``;
+            defaults to ``ell0r`` (isotropic).
+        r0 (float): Reference radius for both correlation-length power laws.
+        pitch (float): Pitch angle [deg] of the correlation ellipse's long
+            axis from the azimuthal direction (sign sets the winding sense).
+
+    Returns:
+        ndarray: Expected ``S_2``, shape ``(lags_x.size, lags_y_deg.size)``.
+            Radial lags with no valid base-row pairs are ``NaN``.
+    """
+    ell0phi, alphaphi = _resolve_phi(ell0r, alphar, ell0phi, alphaphi)
+    r_axis = np.asarray(r_axis, dtype=float)
+    if r_axis.ndim != 1 or r_axis.size < 2:
+        raise ValueError("r_axis must be a 1D radial grid with >= 2 points.")
+    dr = float(np.mean(np.diff(r_axis)))
+    n = r_axis.size
+    di = np.round(np.asarray(lags_x, dtype=float) / dr).astype(int)
+    lp = np.radians(np.asarray(lags_y_deg, dtype=float))
+    pr = np.radians(pitch)
+
+    out = np.full((di.size, lp.size), np.nan)
+    for k, d in enumerate(di):
+        i = np.arange(max(0, -d), min(n, n - d))      # valid base rows
+        if i.size == 0:
+            continue
+        ra = r_axis[i][:, None]
+        rb = r_axis[i + d][:, None]
+        cov = _ps_cov(ra, 0.0, rb, lp[None, :], alphar=alphar, ell0r=ell0r,
+                      alphaphi=alphaphi, ell0phi=ell0phi, sigma=sigma,
+                      r0=r0, pitch=pr)                   # (n_valid, n_phi)
+        out[k] = 2.0 * sigma ** 2 - 2.0 * cov.mean(axis=0)
+    return out
+
+
 # -- RESULT CONTAINER -- #
 
 
@@ -692,10 +1293,90 @@ class StructureFunction2D:
             ref=self.ref, ref_band=self.ref_band,
             x_label=self.x_label, y_label=self.y_label,
             azimuthal_axis=self.azimuthal_axis,
+            symmetrized=self.symmetrized,
         )
         combined.combined_error = S2_err
         combined.combined_std = S2_std
         return combined
+
+    def subtract(self, other, clip=True, n_bins=50, log_spaced=False):
+        """Subtract another ``S_2`` from this one, returning a new result.
+
+        Second-order structure functions add over statistically
+        independent components: if the observed field is signal plus an
+        independent noise field, ``S_2^obs = S_2^signal + S_2^noise``.
+        So a model of the noise ``S_2`` can be removed lag-by-lag to
+        recover the signal's structure function,
+        ``S_2^signal = S_2^obs - S_2^noise``.
+
+        ``other`` is another :class:`StructureFunction2D` on the *same*
+        lag grid -- typically the analytic noise prediction from
+        :func:`gaussian_beam_s2`, an empirical noise ``S_2`` from
+        :meth:`eddy.linecube.linecube.noise_structure_function`, or any
+        parametric noise model evaluated on this object's lags. Note the
+        noise ``S_2`` is generally *lag-dependent* (it rises from zero
+        and saturates to ``2 sigma_noise^2`` only for lags much larger
+        than the noise correlation scale), not a constant floor -- this
+        method subtracts the full lag dependence, which a flat-offset
+        subtraction would get wrong at small lags.
+
+        Unlike :meth:`compare_to` (which returns raw difference arrays
+        for diagnostics), this returns a fully-formed
+        :class:`StructureFunction2D` whose 1D profiles are recomputed
+        from the differenced 2D map, so it can feed straight into
+        :meth:`fit_spiral`, the heatmap helpers, etc.
+
+        The validity of the subtraction rests on the noise being
+        statistically *independent* of the signal (so the cross term
+        ``<dS dN>`` vanishes in expectation). In a finite sample the
+        cross term is only zero on average, and differencing two similar
+        large values near the plateau is noisy, so the result can dip
+        below zero there; ``clip=True`` (the default) floors it at zero.
+
+        Args:
+            other (StructureFunction2D): Noise model to subtract. Must
+                share ``S2`` shape and ``dx, dy``.
+            clip (bool): Clip the differenced ``S_2`` (2D and the
+                recomputed profiles) at zero. Defaults to ``True``.
+            n_bins (int): Radial bins for the azimuthal average of the
+                result.
+            log_spaced (bool): Log-spaced radial bins for the result.
+
+        Returns:
+            StructureFunction2D: ``self.S2 - other.S2``, with metadata
+            (grid, reference annulus, labels, azimuthal axis) inherited
+            from ``self`` and ``counts`` carried over from ``self``
+            (the observed field's pair counts, the right weighting basis
+            for the recovered signal).
+        """
+        if self.S2.shape != other.S2.shape:
+            raise ValueError("S2 shapes do not match: {} vs {}."
+                             .format(self.S2.shape, other.S2.shape))
+        if self.dx != other.dx or self.dy != other.dy:
+            raise ValueError("dx, dy do not match.")
+
+        S2_diff = self.S2 - other.S2
+        if clip:
+            S2_diff = np.clip(S2_diff, 0.0, None)
+
+        # Recompute the 1D profiles from the differenced (and possibly
+        # clipped) 2D map so they stay consistent with S2 -- subtracting
+        # the stored profiles directly would disagree with the 2D map
+        # wherever the clip bites.
+        lags_x, lags_y, lags_i, S2_x, S2_y, S2_i = extract_basic_profiles(
+            S2_diff, self.max_lag_x, self.max_lag_y, dx=self.dx, dy=self.dy,
+            n_bins=n_bins, log_spaced=log_spaced,
+        )
+        return type(self)(
+            S2=S2_diff, counts=self.counts, dx=self.dx, dy=self.dy,
+            lags_x=lags_x, lags_y=lags_y, lags_i=lags_i,
+            S2_x=S2_x, S2_y=S2_y, S2_i=S2_i,
+            x_grid=self.x_grid, y_grid=self.y_grid,
+            ref=self.ref, ref_band=self.ref_band,
+            x_label=self.x_label, y_label=self.y_label,
+            azimuthal_axis=self.azimuthal_axis,
+            symmetrized=self.symmetrized,
+        )
 
     def compare_to(self, other, eps=1e-30):
         """Compare this ``S_2`` against another on the same lag grid.
@@ -807,6 +1488,121 @@ class StructureFunction2D:
         fig.tight_layout()
         return fig if return_fig else None
 
+    def plateau(self, frac=0.5, stat="median"):
+        """Robust large-lag plateau of ``S_2`` (the ``2 sigma^2`` asymptote).
+
+        Pools the outer-lag portion (lag ``> frac * max_lag``) of the
+        radial and azimuthal slices and returns a robust statistic --
+        ``median`` by default, so a single noisy outlier (common in a
+        denoised / low-pair-count slice) does not set the level the way
+        ``np.nanmax`` would.
+
+        Args:
+            frac (float): Fraction of the lag range treated as "large lag".
+                ``0.5`` -> outer half of each slice.
+            stat ({'median', 'mean'}): Reduction over the pooled outer cells.
+
+        Returns:
+            float: the plateau estimate (``nan`` if no finite outer cells).
+        """
+        vals = []
+        for lags, s2 in ((self.lags_x, self.S2_x), (self.lags_y, self.S2_y)):
+            if lags.size == 0:
+                continue
+            sel = np.asarray(s2)[lags >= frac * lags[-1]]
+            vals.append(sel[np.isfinite(sel)])
+        pooled = np.concatenate(vals) if vals else np.array([])
+        if pooled.size == 0:
+            return float("nan")
+        return float(np.median(pooled) if stat == "median" else np.mean(pooled))
+
+    def half_power_lag(self, axis="x", level=0.5, plateau=None):
+        """Lag at which a 1D slice first reaches ``level * plateau``.
+
+        A model-free correlation-scale proxy: the lag where ``S_2`` first
+        crosses half its plateau (``= 1.18 ell`` for a Gaussian kernel, but
+        no Gaussian assumption is made). Located by linear interpolation of
+        the FIRST upward crossing, so it is robust to non-monotonic wiggles
+        at larger lag.
+
+        Args:
+            axis ({'x', 'y'}): ``'x'`` -> radial slice ``S2_x`` (lag in the
+                x units, arcsec); ``'y'`` -> azimuthal slice ``S2_y`` (lag
+                in the y units, degrees).
+            level (float): Fraction of the plateau to cross (``0.5`` = half
+                power).
+            plateau (Optional[float]): Plateau to use; defaults to
+                :meth:`plateau`.
+
+        Returns:
+            float: the crossing lag in that axis's units (``nan`` if the
+            slice never reaches the level within the lag range).
+        """
+        if axis == "x":
+            lags, s2 = self.lags_x, self.S2_x
+        elif axis == "y":
+            lags, s2 = self.lags_y, self.S2_y
+        else:
+            raise ValueError("axis must be 'x' or 'y', got {!r}.".format(axis))
+        if plateau is None:
+            plateau = self.plateau()
+        target = level * plateau
+        if not np.isfinite(target) or target <= 0:
+            return float("nan")
+        above = np.isfinite(s2) & (np.asarray(s2) >= target)
+        if not above.any():
+            return float("nan")
+        i = int(np.argmax(above))                  # first crossing index
+        if i == 0:
+            return float(lags[0])
+        x0, x1, y0, y1 = lags[i - 1], lags[i], s2[i - 1], s2[i]
+        if y1 == y0:
+            return float(x1)
+        return float(x0 + (target - y0) * (x1 - x0) / (y1 - y0))
+
+    def reliability_weight(self, kind="counts"):
+        """Relative per-annulus reliability for weighting cross-annulus averages.
+
+        A single annulus's measurement is more trustworthy the more
+        independent samples it contains. Use this to weight per-annulus
+        quantities (e.g. the anisotropy log-ratio in ``T_2``) when
+        collapsing them across radius.
+
+        Args:
+            kind ({'counts', 'neff'}):
+                ``'counts'`` (default) -- total pair count on the on-axis
+                    slices; model-free, more pairs -> more reliable. A
+                    relative proxy.
+                ``'neff'`` -- effective number of independent patches in the
+                    annulus, ``~ (radial lag range / ell_r) * (360 deg /
+                    ell_phi)``; closer to the true statistical weight but
+                    assumes a single correlation scale via
+                    :meth:`half_power_lag`.
+
+        Returns:
+            float: a non-negative relative weight (``0`` if undefined).
+
+        Note:
+            The statistically rigorous weight is the inverse variance of
+            your specific statistic from the null / bootstrap ensemble;
+            these are quick single-annulus proxies.
+        """
+        if kind == "counts":
+            cx = self.counts[self.max_lag_x:, self.max_lag_y]
+            cy = self.counts[self.max_lag_x, self.max_lag_y:]
+            w = np.nansum(cx) + np.nansum(cy)
+            return float(w) if np.isfinite(w) else 0.0
+        if kind == "neff":
+            ell_r = self.half_power_lag("x")
+            ell_phi_deg = self.half_power_lag("y")
+            if not (np.isfinite(ell_r) and ell_r > 0
+                    and np.isfinite(ell_phi_deg) and ell_phi_deg > 0):
+                return 0.0
+            n_r = self.lags_x[-1] / ell_r          # patches across the radial lag range
+            n_phi = 360.0 / ell_phi_deg            # patches around the full ring
+            return float(max(n_r, 1.0) * max(n_phi, 1.0))
+        raise ValueError("kind must be 'counts' or 'neff', got {!r}.".format(kind))
+
     def fit_spiral(self, modes=(1,), axis=None, p0=None):
         """Fit a multi-mode spiral model to a 1D azimuthal slice of S_2.
 
@@ -872,6 +1668,336 @@ class StructureFunction2D:
             return model(popt, np.asarray(dphi_deg))
 
         return popt, perr, model_fn
+
+    # -- PITCHED-GRF FIT -- #
+
+    def _grf_pitch_setup(self, r_axis, floor_frac, sigma_map, p0):
+        """Shared setup for :meth:`fit_GRF_pitch`.
+
+        Returns ``(r_axis, lags_x, lags_y_deg, S2, w, mask, model, est)`` where
+        ``model(mp)`` maps a linear model-parameter dict (``sigma, alphar,
+        ell0r, ell0phi, alphaphi, pitch``) to the predicted global surface,
+        ``w`` is the weight array, ``mask`` selects the finite / populated lag
+        bins, and ``est`` is the dict of linear-space initial estimates.
+        """
+        r_axis = np.asarray(r_axis, dtype=float)
+        if r_axis.ndim != 1 or r_axis.size < self.max_lag_x + 1:
+            raise ValueError(
+                "r_axis must be the 1D radial grid (axis 0) of the field this "
+                "S_2 was built from; need at least max_lag_x + 1 = {} points "
+                "(got shape {}).".format(self.max_lag_x + 1, np.shape(r_axis)))
+        ddr = np.diff(r_axis)
+        if not np.allclose(ddr, ddr[0]) or not np.isclose(ddr[0], self.dx):
+            raise ValueError(
+                "r_axis must be uniform with spacing dx={:.6g} (the surface's "
+                "radial pixel scale); got mean spacing {:.6g}. Pass the same "
+                "radial grid the field was built on.".format(
+                    self.dx, float(np.mean(ddr))))
+
+        lags_x = self.lags_x_full
+        lags_y_deg = np.arange(-self.max_lag_y, self.max_lag_y + 1) * self.dy
+        S2 = self.S2
+
+        # Empty (zero-count) lag bins are not measurements: exclude them so
+        # they neither bias the fit nor inflate the plateau / weights.
+        mask = self.counts > 0
+        if not mask.any():
+            raise ValueError("No populated lag bins to fit.")
+
+        # Pitch lives entirely in the antisymmetric (off-diagonal) part of the
+        # surface. A reference-annulus S_2 mirror-fills the azimuthal lag
+        # (S2[:, +dphi] == S2[:, -dphi] exactly), so it is symmetric in l_phi
+        # and carries no pitch sign; only a global-mode (ref_i=-1) surface --
+        # point-symmetric but not l_phi-symmetric -- preserves the ridge. A
+        # single global realization is never exactly l_phi-symmetric, so an
+        # exact-mirror test cleanly catches the reference-mode case.
+        both = mask & mask[:, ::-1]
+        if both.any() and np.allclose(S2[both], S2[:, ::-1][both],
+                                      rtol=1e-9, atol=1e-12):
+            raise ValueError(
+                "This S_2 is exactly symmetric in the azimuthal lag, i.e. a "
+                "reference-annulus surface (ref={!r}). Its kernel mirror-fills "
+                "the azimuthal lag, averaging the antisymmetric pitch ridge -- "
+                "and the pitch sign -- away, so pitch is unmeasurable. Rebuild "
+                "in global mode: StructureFunction2D.from_array(field, "
+                "ref_i=-1, ...).".format(self.ref))
+
+        plateau = float(np.nanmax(np.abs(S2[mask])))
+        if not plateau > 0:
+            raise ValueError("S_2 is everywhere zero on populated bins.")
+
+        if sigma_map is not None:
+            w = np.asarray(sigma_map, dtype=float)
+            if w.shape != S2.shape:
+                raise ValueError(
+                    "sigma_map must match S2.shape {} (got {}).".format(
+                        S2.shape, w.shape))
+        else:
+            w = np.maximum(np.abs(S2), floor_frac * plateau)
+
+        def model(mp):
+            return grf_s2_2d_global(
+                r_axis, lags_x, lags_y_deg, sigma=mp["sigma"],
+                alphar=mp["alphar"], ell0r=mp["ell0r"],
+                alphaphi=mp["alphaphi"], ell0phi=mp["ell0phi"],
+                r0=self._grf_pitch_r0, pitch=mp["pitch"])
+
+        est = self._grf_pitch_initial_guess(r_axis, plateau, p0)
+        return r_axis, lags_x, lags_y_deg, S2, w, mask, model, est
+
+    def _grf_pitch_initial_guess(self, r_axis, plateau, p0):
+        """Heuristic start, as a linear-space dict ``{sigma, alphar, ell0r,
+        ell0phi, alphaphi, pitch}``.
+
+        ``sigma`` from the plateau (``2 sigma^2``), ``ell0r`` from the radial
+        half-power lag, ``ell0phi`` from the azimuthal half-power lag (arc
+        length) at the median radius, and ``alphar = alphaphi = pitch = 0`` (a
+        single global surface gives no radial-slope leverage, and ``pitch`` is
+        the parameter being searched). ``p0`` (any of ``sigma, alphar, ell0r,
+        ell0phi, alphaphi, pitch`` in linear space, ``pitch`` in deg) overrides
+        the corresponding heuristic.
+        """
+        g = dict(sigma=None, alphar=None, ell0r=None, ell0phi=None,
+                 alphaphi=None, pitch=None)
+        if p0:
+            g.update(p0)
+
+        sigma0 = (g["sigma"] if g["sigma"] is not None
+                  else np.sqrt(max(plateau, 0.0) / 2.0)) or 1.0
+        hp_x = self.half_power_lag("x")
+        hp_y = self.half_power_lag("y")
+        dx = self.dx
+        ell0r0 = g["ell0r"]
+        if ell0r0 is None:
+            ell0r0 = hp_x / 1.177 if np.isfinite(hp_x) and hp_x > 0 else 5.0 * dx
+        ell0r0 = max(ell0r0, dx)
+
+        ell0phi0 = g["ell0phi"]
+        if ell0phi0 is None:
+            r_ref = float(np.median(r_axis))
+            ell_phi0 = np.radians(hp_y) * r_ref / 1.177
+            ell0phi0 = (ell_phi0 if np.isfinite(ell_phi0) and ell_phi0 > 0
+                        else ell0r0)
+        ell0phi0 = max(ell0phi0, dx)
+
+        alphar0 = 0.0 if g["alphar"] is None else float(g["alphar"])
+        alphaphi0 = alphar0 if g["alphaphi"] is None else float(g["alphaphi"])
+        pitch0 = 0.0 if g["pitch"] is None else float(g["pitch"])
+        return dict(sigma=float(sigma0), alphar=alphar0, ell0r=float(ell0r0),
+                    ell0phi=float(ell0phi0), alphaphi=alphaphi0, pitch=pitch0)
+
+    def fit_GRF_pitch(self, r_axis, r0=1.0, floor_frac=0.05, sigma_map=None,
+                      method="lsq", p0=None, bounds=None, priors=None,
+                      jitter=True, fit_alphaphi=False, nwalkers=64, nburnin=500,
+                      nsteps=1000, scatter=1e-3, plots=None, returns=None,
+                      pool=None, progress=True):
+        """Fit the pitched anisotropic GRF to this global ``S_2`` *surface*.
+
+        Solves for ``(sigma, alphar, ell0r, ell0phi, pitch)`` by fitting the
+        full 2D surface against :func:`grf_s2_2d_global` -- the global-mode
+        expected ``S_2``. Unlike :meth:`StructureFunction2DStack.fit_GRF`
+        (which fits the on-axis 1D slices), this can recover ``pitch``: on the
+        slices ``pitch`` is *perfectly degenerate* with ``(ell0phi, ell0r)`` (a
+        tilted ellipse just rescales the on-axis widths), so its only unique
+        signature is the antisymmetric off-diagonal ridge of the 2D surface.
+
+        **Requires a global-mode result** (``StructureFunction2D.from_array(
+        field, ref_i=-1, ...)``). A reference-annulus surface mirror-fills the
+        azimuthal lag, making the surface symmetric in ``l_phi`` and the pitch
+        sign unmeasurable; the method raises if :attr:`ref` is set.
+
+        By default ``alphaphi`` is tied to ``alphar``; set ``fit_alphaphi=True``
+        to free the azimuthal slope. Sampling space is ``(log sigma, alphar,
+        log ell0r, log ell0phi[, alphaphi], pitch)`` -- positive parameters fit
+        in log, ``alphar``/``alphaphi``/``pitch`` linear (``pitch`` in degrees).
+
+        Args:
+            r_axis (ndarray): Absolute radii [arcsec] of axis 0 of the field
+                this ``S_2`` was built from (length ``S2.shape[0]``). Sets the
+                base radii averaged over and the radial scaling of ``ell_r``.
+            r0 (float): Reference radius [arcsec] in
+                ``ell_r(r) = ell0r (r / r0)**alphar``.
+            floor_frac (float): Floor for the default weighting, as a fraction
+                of the surface plateau (ignored if ``sigma_map`` is given).
+            sigma_map (Optional[ndarray]): Per-bin uncertainty, same shape as
+                :attr:`S2`, used as the residual weight. If ``None``, uses
+                ``max(|S2|, floor_frac * plateau)`` since the scatter scales
+                with ``S_2``. Supply a real uncertainty (e.g. the bootstrap
+                ``S_2`` scatter) for trustworthy ``mcmc`` credible intervals.
+            method ({'lsq', 'mcmc'}): Back-end. ``'lsq'`` is a least-squares
+                point estimate with a Gauss-Newton covariance; ``'mcmc'`` is an
+                ``emcee`` sampler initialised from the ``lsq`` solution.
+            p0 (Optional[dict]): Override the heuristic start for any of
+                ``sigma, alphar, ell0r, ell0phi, alphaphi, pitch`` (linear
+                space; ``pitch`` deg).
+            bounds (Optional[dict]): Flat-prior bounds per key ``sigma, alphar,
+                ell0r, ell0phi, alphaphi, pitch, jitter`` (linear/deg), each
+                ``(lo, hi)``.
+            priors (Optional[dict]): Gaussian priors (``mcmc``) keyed the same
+                way, each ``(mu, sigma)`` in *sampling* space (log for ``sigma,
+                ell0r, ell0phi, jitter``; linear for ``alphar, alphaphi,
+                pitch``).
+            jitter (bool): ``mcmc`` only. Add a log-scale nuisance ``s`` scaling
+                every weight; adds a trailing ``s`` column to ``samples``.
+            fit_alphaphi (bool): If ``True``, free the azimuthal slope
+                ``alphaphi``. Default ``False`` ties ``alphaphi = alphar``.
+            nwalkers, nburnin, nsteps (int): ``emcee`` sizes (``mcmc`` only).
+            scatter (float): Fractional walker-ball scatter about the ``lsq``
+                solution.
+            plots (Optional[list]): ``mcmc`` only; any of ``'walkers'``,
+                ``'corner'``, ``'bestfit'`` (measured/model/residual surfaces),
+                or ``'none'``. Defaults to ``['walkers', 'corner']``.
+            returns (Optional[list]): ``mcmc`` only; any of ``'samples'``,
+                ``'sampler'``, ``'lnprob'``, ``'percentiles'``, ``'dict'``,
+                ``'none'``. Defaults to ``['samples']`` (linear-space chain,
+                columns aligned to the active keys ``[sigma, alphar, ell0r,
+                ell0phi(, alphaphi), pitch(, s)]``).
+            pool: Optional worker pool for ``emcee``.
+            progress (bool): Show the ``emcee`` progress bar.
+
+        Returns:
+            ``method='lsq'``: ``(params, perr, sol, cov)`` -- best-fit and
+            formal 1-sigma dicts keyed by the active params (``sigma, alphar,
+            ell0r, ell0phi, pitch`` and, if ``fit_alphaphi``, ``alphaphi``), the
+            ``scipy.optimize.least_squares`` result, and the covariance in
+            sampling space. A tied ``alphaphi`` is added to ``params`` (equal to
+            ``alphar``) without a ``perr`` entry.
+
+            ``method='mcmc'``: whatever ``returns`` selects.
+        """
+        from scipy.optimize import least_squares
+
+        self._grf_pitch_r0 = float(r0)
+        (r_axis, lags_x, lags_y_deg, S2, w, mask, model,
+         est) = self._grf_pitch_setup(r_axis, floor_frac, sigma_map, p0)
+
+        # Model (no-jitter) sampling keys drive the LM solve; jitter is added
+        # only for the MCMC stage below.
+        model_keys = _grf_sample_keys(pitch=True, fit_alphaphi=fit_alphaphi)
+        x0 = _grf_x0(model_keys, est)
+
+        def resid(theta):
+            m = model(_grf_unpack(theta, model_keys))
+            return ((m - S2) / w)[mask]
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            sol = least_squares(resid, x0, method="trf")
+
+        if method == "lsq":
+            mp = _grf_unpack(sol.x, model_keys)
+            J = sol.jac
+            dof = max(J.shape[0] - J.shape[1], 1)
+            cov = np.linalg.inv(J.T @ J) * (2.0 * sol.cost / dof)
+            params = {k: mp[k] for k in model_keys}
+            perr = _grf_perr(model_keys, mp, cov)
+            if "alphaphi" not in params:              # tied: report for clarity
+                params["alphaphi"] = mp["alphaphi"]
+            return params, perr, sol, cov
+
+        if method != "mcmc":
+            raise ValueError(
+                "method must be 'lsq' or 'mcmc', got {!r}.".format(method))
+
+        import emcee
+        from .helper_functions import random_p0, plot_walkers, plot_corner
+
+        keys = _grf_sample_keys(pitch=True, fit_alphaphi=fit_alphaphi,
+                                jitter=jitter)
+        lo, hi = _grf_bounds_from_keys(keys, bounds)
+        pmu, psd = _grf_prior_arrays_from_keys(keys, priors)
+        theta0 = list(sol.x) + ([0.0] if jitter else [])
+        ndim = len(theta0)
+        log_labels, lin_labels = _grf_labels(keys)
+        print("Assuming:\n\tp0 = [%s]."
+              % (", ".join(la.replace("$", "") for la in lin_labels)))
+
+        resid_w = w[mask]
+
+        def ln_prob(theta):
+            if np.any(theta < lo) or np.any(theta > hi):
+                return -np.inf
+            mp = _grf_unpack(theta, keys)
+            r_raw = (model(mp) - S2)[mask]
+            if not np.all(np.isfinite(r_raw)):
+                return -np.inf
+            var = (mp["s"] ** 2 if jitter else 1.0) * resid_w ** 2
+            ln_like = -0.5 * np.sum(r_raw ** 2 / var
+                                    + np.log(2.0 * np.pi * var))
+            ln_prior = -0.5 * np.sum(((theta - pmu) / psd) ** 2)
+            return ln_like + ln_prior
+
+        nwalkers = max(int(nwalkers), 2 * ndim)
+        p0_ball = random_p0(theta0, scatter, nwalkers)
+        with np.errstate(over="ignore", invalid="ignore"):
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, ln_prob, pool=pool)
+            sampler.run_mcmc(p0_ball, int(nburnin) + int(nsteps),
+                             progress=progress)
+
+        chain = sampler.get_chain(discard=int(nburnin), flat=True)
+        cols = [np.exp(chain[:, n]) if k in _GRF_LOG_SAMPLED else chain[:, n]
+                for n, k in enumerate(keys)]
+        samples = np.column_stack(cols)
+
+        if plots is None:
+            plots = ["walkers", "corner"]
+        plots = np.atleast_1d(plots)
+        if "none" in plots:
+            plots = []
+        if "walkers" in plots:
+            walkers = np.transpose(sampler.get_chain(), (2, 0, 1))
+            plot_walkers(walkers, int(nburnin), log_labels)
+        if "corner" in plots:
+            plot_corner(samples, lin_labels)
+        if "bestfit" in plots:
+            self._plot_grf_pitch_bestfit(
+                r_axis, lags_x, lags_y_deg, S2, mask, model,
+                _grf_unpack(np.median(chain, axis=0), keys))
+
+        if returns is None:
+            returns = ["samples"]
+        returns = np.atleast_1d(returns)
+        if "none" in returns:
+            return None
+        pct = np.percentile(samples, [16, 50, 84], axis=0)
+        medians = {k: pct[1, n] for n, k in enumerate(keys)}
+        to_return = []
+        if "samples" in returns:
+            to_return += [samples]
+        if "sampler" in returns:
+            to_return += [sampler]
+        if "lnprob" in returns:
+            to_return += [sampler.get_log_prob(discard=int(nburnin), flat=True)]
+        if "percentiles" in returns:
+            to_return += [pct]
+        if "dict" in returns:
+            to_return += [medians]
+        return to_return if len(to_return) > 1 else to_return[0]
+
+    def _plot_grf_pitch_bestfit(self, r_axis, lags_x, lags_y_deg, S2, mask,
+                                model, mp):
+        """Measured / model / residual surfaces for the pitched-GRF best fit.
+
+        ``mp`` is a linear model-parameter dict (see :func:`_grf_unpack`)."""
+        import matplotlib.pyplot as plt
+
+        m = model(mp)
+        resid = np.where(mask, m - S2, np.nan)
+        extent = (lags_y_deg[0], lags_y_deg[-1], lags_x[0], lags_x[-1])
+        vmax = np.nanmax(np.abs(S2[mask]))
+        fig, axes = plt.subplots(1, 3, figsize=(11.0, 3.6),
+                                 constrained_layout=True)
+        for ax, img, ttl, kw in (
+                (axes[0], np.where(mask, S2, np.nan), "measured",
+                 dict(vmin=0, vmax=vmax)),
+                (axes[1], np.where(mask, m, np.nan), "model",
+                 dict(vmin=0, vmax=vmax)),
+                (axes[2], resid, "residual",
+                 dict(cmap="bwr", vmin=-0.3 * vmax, vmax=0.3 * vmax))):
+            im = ax.imshow(img, origin="lower", aspect="auto", extent=extent,
+                           **kw)
+            ax.set(title=ttl, xlabel=self.y_label, ylabel=self.x_label)
+            fig.colorbar(im, ax=ax)
+        return axes
 
     # -- PLOTTING -- #
 
@@ -969,6 +2095,62 @@ class StructureFunction2DStack:
     def __getitem__(self, idx):
         return self.results[idx]
 
+    @classmethod
+    def from_array(cls, field, ref_rs, *, x_axis=None, dx=1.0, dy=1.0,
+                   ref_band=0.0, max_lag_x=None, max_lag_y=None,
+                   n_bins=50, log_spaced=False, symmetrize=True,
+                   azimuthal_axis="y", x_label="lag_x", y_label="lag_y",
+                   y_grid=None):
+        """Build a stack from one bare 2D polar field at a sequence of radii.
+
+        The bare-array analogue of
+        :meth:`eddy.momentmap.momentmap.compute_structure_function_stack`:
+        runs :meth:`StructureFunction2D.from_array` at each reference radius
+        on the SAME field (axis 0 = radius, axis 1 = azimuth). For real sky
+        data that still needs deprojection, use the ``momentmap`` method
+        instead -- this is for fields already on a polar grid.
+
+        Args:
+            field (ndarray): 2D field, axis 0 = radius, axis 1 = azimuth.
+            ref_rs (sequence of float): Reference radii, in the units of
+                ``x_axis`` (or of ``dx`` if ``x_axis`` is ``None``). Each is
+                matched to the nearest ``x_axis`` entry.
+            x_axis (Optional[ndarray]): Physical coordinate of axis 0.
+                Defaults to ``np.arange(n_x) * dx``.
+            dx, dy (float): Grid spacing along axis 0 / 1.
+            ref_band (float): Reference-annulus half-width in ``x_axis`` units.
+            max_lag_x, max_lag_y (Optional[int]): Lag extents IN PIXELS
+                (as in :meth:`StructureFunction2D.from_array`).
+            n_bins, log_spaced, symmetrize: Forwarded per annulus.
+            azimuthal_axis, x_label, y_label: Result metadata.
+            y_grid (Optional[ndarray]): Axis-1 coordinate stored on the stack.
+
+        Returns:
+            StructureFunction2DStack
+        """
+        field = np.asarray(field)
+        if field.ndim != 2:
+            raise ValueError("field must be 2D (n_x, n_y); got shape {}."
+                             .format(field.shape))
+        if x_axis is None:
+            x_axis = np.arange(field.shape[0]) * dx
+        x_axis = np.asarray(x_axis, dtype=float)
+        ref_rs = np.atleast_1d(np.asarray(ref_rs, dtype=float))
+        ref_band_idx = int(round(ref_band / dx)) if ref_band > 0 else 0
+
+        results = []
+        for rr in ref_rs:
+            ref_i = int(np.argmin(np.abs(x_axis - rr)))
+            results.append(StructureFunction2D.from_array(
+                field, dx=dx, dy=dy, max_lag_x=max_lag_x, max_lag_y=max_lag_y,
+                ref_i=ref_i, ref_band=ref_band_idx,
+                n_bins=n_bins, log_spaced=log_spaced, symmetrize=symmetrize,
+                azimuthal_axis=azimuthal_axis, x_label=x_label,
+                y_label=y_label, ref=float(x_axis[ref_i]),
+            ))
+        return cls(ref_rs=ref_rs, ref_band=float(ref_band), results=results,
+                   x_grid=x_axis, y_grid=y_grid, gridded=field)
+
     @property
     def lags_x(self):
         return self.results[0].lags_x
@@ -1025,6 +2207,27 @@ class StructureFunction2DStack:
         return np.stack([r.S2_i for r in self.results])
 
     @property
+    def counts_x_stack(self):
+        """Pair counts on the outward radial-lag slice at each ``ref_r``,
+        shape ``(N_ref, mlx+1)`` -- aligned cell-for-cell with
+        :attr:`S2_x_stack`. Feeds :meth:`pairwise_error_heatmaps`."""
+        return np.stack([r.counts[r.max_lag_x:, r.max_lag_y]
+                         for r in self.results])
+
+    @property
+    def counts_x_full_stack(self):
+        """Pair counts on the two-sided radial-lag slice at each ``ref_r``,
+        shape ``(N_ref, 2*mlx+1)`` -- aligned with :attr:`S2_x_full_stack`."""
+        return np.stack([r.counts[:, r.max_lag_y] for r in self.results])
+
+    @property
+    def counts_y_stack(self):
+        """Pair counts on the azimuthal-lag slice at each ``ref_r``, shape
+        ``(N_ref, mly+1)`` -- aligned with :attr:`S2_y_stack`."""
+        return np.stack([r.counts[r.max_lag_x, r.max_lag_y:]
+                         for r in self.results])
+
+    @property
     def extent(self):
         """Matplotlib ``extent`` for ``imshow(self.gridded, origin='lower')``:
         ``(y_grid_min, y_grid_max, x_grid_min, x_grid_max)``.
@@ -1066,6 +2269,690 @@ class StructureFunction2DStack:
             popts.append(popt)
             perrs.append(perr)
         return np.asarray(popts), np.asarray(perrs)
+
+    def calculate_modal_power(self, modes=(1,), axis=None, p0=None):
+        """Per-annulus azimuthal modal power and fractional power.
+
+        Fits the multi-mode spiral model (:meth:`fit_spiral`) at every
+        reference radius and converts the fitted amplitudes into power.
+        Each mode contributes ``A_m^2 (1 - cos(m dphi))`` to the azimuthal
+        ``S_2``, so the **modal power** is ``A_m^2``, and ``Nphi`` (the fit
+        offset, column 0) is the non-oscillating baseline (noise + any
+        axisymmetric power).
+
+        Args:
+            modes (tuple of int): Spiral modes, as in :meth:`fit_spiral`.
+            axis (Optional[str]): Slice to fit; defaults to the azimuthal
+                axis.
+            p0 (Optional[sequence]): Shared initial guess.
+
+        Returns:
+            dict with per-annulus arrays (``N_ref`` rows; mode arrays have
+            ``len(modes)`` columns in the order of ``modes``):
+
+            * ``modes`` -- the mode list, shape ``(n_modes,)``.
+            * ``power`` -- modal power ``A_m^2``, ``(N_ref, n_modes)``.
+            * ``power_err`` -- its 1-sigma (``2 |A_m| sigma_{A_m}``).
+            * ``offset`` -- ``Nphi`` baseline, ``(N_ref,)``.
+            * ``modal_total`` -- ``sum_m power``, ``(N_ref,)``.
+            * ``fitted_total`` -- ``offset + modal_total``, ``(N_ref,)``.
+            * ``data_var`` -- mean observed azimuthal ``S_2`` per annulus
+              (``nanmean`` of the azimuthal heatmap), ``(N_ref,)``.
+            * ``frac_among_modes`` -- ``power / modal_total``: each mode's
+              share of the *modal* budget, ``(N_ref, n_modes)``.
+            * ``frac_of_fit`` -- ``power / fitted_total``: share of the
+              total fitted power (modes + offset), ``(N_ref, n_modes)``.
+            * ``frac_offset`` -- ``offset / fitted_total``: non-modal share
+              of the fit, ``(N_ref,)``.
+            * ``frac_of_data`` -- ``power / data_var``: modal power as a
+              fraction of the observed azimuthal variance, ``(N_ref, n_modes)``.
+            * ``frac_of_data_total`` -- ``sum_m frac_of_data``, ``(N_ref,)``.
+            * ``popt``, ``perr`` -- the raw fit outputs.
+        """
+        popt, perr = self.fit_spiral(modes=modes, axis=axis, p0=p0)
+        offset = popt[:, 0]
+        amps = popt[:, 1:]
+        power = amps ** 2
+        power_err = 2.0 * np.abs(amps) * perr[:, 1:]
+        modal_total = power.sum(axis=1)
+        fitted_total = offset + modal_total
+
+        _, _, C = self.calculate_azimuthal_heatmap()
+        data_var = np.nanmean(C, axis=1)
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            frac_among_modes = power / modal_total[:, None]
+            frac_of_fit = power / fitted_total[:, None]
+            frac_offset = offset / fitted_total
+            frac_of_data = power / data_var[:, None]
+
+        return dict(
+            modes=np.asarray(modes),
+            power=power, power_err=power_err, offset=offset,
+            modal_total=modal_total, fitted_total=fitted_total,
+            data_var=data_var,
+            frac_among_modes=frac_among_modes,
+            frac_of_fit=frac_of_fit,
+            frac_offset=frac_offset,
+            frac_of_data=frac_of_data,
+            frac_of_data_total=frac_of_data.sum(axis=1),
+            popt=popt, perr=perr,
+        )
+
+    _MODAL_POWER_LABELS = {
+        "power": r"modal power $A_m^2$",
+        "frac_of_fit": r"fractional power $A_m^2 / (N_\phi + \sum_m A_m^2)$",
+        "frac_of_data": r"$A_m^2 / \langle S_2^\phi\rangle$",
+        "frac_among_modes": r"$A_m^2 / \sum_m A_m^2$",
+    }
+
+    def plot_modal_power(self, modes=(1,), axis=None, p0=None,
+                         which="frac_of_fit", show_offset=True, ax=None,
+                         return_fig=False, **plot_kwargs):
+        """Plot per-mode (fractional) azimuthal power vs reference radius.
+
+        One line per mode, from :meth:`calculate_modal_power`.
+
+        Args:
+            modes (tuple of int): Spiral modes, as in :meth:`calculate_modal_power`.
+            axis, p0: Forwarded to :meth:`calculate_modal_power` / :meth:`fit_spiral`.
+            which ({'frac_of_fit', 'frac_of_data', 'frac_among_modes',
+                'power'}): Which per-mode quantity to plot. Default
+                ``'frac_of_fit'`` (each mode's share of the total fitted
+                power).
+            show_offset (bool): When ``which='frac_of_fit'``, also draw the
+                non-modal baseline fraction (``frac_offset``) as a dashed
+                line, completing the budget to 1.
+            ax (Optional): Matplotlib ``Axes`` to draw into.
+            return_fig (bool): Return the figure object.
+            **plot_kwargs: Forwarded to ``ax.plot`` for the mode lines.
+        """
+        import matplotlib.pyplot as plt
+
+        if which not in self._MODAL_POWER_LABELS:
+            raise ValueError(
+                "which must be one of {}; got {!r}.".format(
+                    list(self._MODAL_POWER_LABELS), which)
+            )
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure
+
+        mp = self.calculate_modal_power(modes=modes, axis=axis, p0=p0)
+        Y = mp[which]
+        for j, m in enumerate(mp["modes"]):
+            ax.plot(self.ref_rs, Y[:, j], label="$m={}$".format(int(m)),
+                    **plot_kwargs)
+        if show_offset and which == "frac_of_fit":
+            ax.plot(self.ref_rs, mp["frac_offset"], ls="--", color="k",
+                    label="offset")
+
+        ax.set_xlabel(r"$r_{\rm ref}$ (arcsec)")
+        ax.set_ylabel(self._MODAL_POWER_LABELS[which])
+        ax.legend()
+        return fig if return_fig else None
+
+    def _check_ref_rs(self, others, what):
+        """Validate that ``others`` share this stack's ``ref_rs`` (count
+        and values), so per-annulus operations line up ring-for-ring."""
+        for o in others:
+            if not isinstance(o, StructureFunction2DStack):
+                raise TypeError(
+                    "{}: expected a StructureFunction2DStack, got {}. "
+                    "(A single StructureFunction2D has no reference-radius "
+                    "axis; use StructureFunction2D.subtract / .combine for "
+                    "single results.)".format(what, type(o).__name__)
+                )
+            if len(o) != len(self):
+                raise ValueError(
+                    "{}: stacks have different N_ref ({} vs {}).".format(
+                        what, len(self), len(o))
+                )
+            if not np.allclose(o.ref_rs, self.ref_rs):
+                raise ValueError(
+                    "{}: stacks have different ref_rs.".format(what)
+                )
+
+    def subtract(self, other, clip=True, n_bins=50, log_spaced=False):
+        """Subtract another stack from this one, ring by ring.
+
+        Applies :meth:`StructureFunction2D.subtract` at every reference
+        radius, so it removes a noise model from an observed stack while
+        preserving the per-ring geometry. Because the subtraction happens
+        at the ``S_2`` level, *every* heatmap built from the result is
+        correctly denoised -- including the nonlinear ones (``row_max``
+        normalization, and the :meth:`calculate_anisotropy_heatmap`
+        ratio) where subtracting two finished heatmaps would be wrong.
+
+        ``other`` is typically the mean noise stack from
+        :meth:`combine` over many noise-only realizations, computed with
+        the same ``compute_structure_function_stack`` call (same
+        ``ref_rs``, ``ref_band`` and deprojection geometry) as this one.
+
+        Args:
+            other (StructureFunction2DStack): Noise model to subtract.
+                Must share ``ref_rs`` and per-ring lag grids.
+            clip (bool): Forwarded to
+                :meth:`StructureFunction2D.subtract`; floor the
+                differenced ``S_2`` at zero. Default ``True``.
+            n_bins (int): Radial bins for the azimuthal average of each
+                differenced ring.
+            log_spaced (bool): Log-spaced radial bins for the result.
+
+        Returns:
+            StructureFunction2DStack: a new stack with the same
+            ``ref_rs`` / ``ref_band`` / grid, holding the per-ring
+            differences. ``gridded`` is dropped (the denoised stack does
+            not correspond to a single field).
+        """
+        self._check_ref_rs([other], "subtract")
+        results = [s.subtract(o, clip=clip, n_bins=n_bins,
+                              log_spaced=log_spaced)
+                   for s, o in zip(self.results, other.results)]
+        return type(self)(
+            ref_rs=self.ref_rs, ref_band=self.ref_band, results=results,
+            x_grid=self.x_grid, y_grid=self.y_grid,
+        )
+
+    def combine(self, others, n_bins=50, log_spaced=False):
+        """Pair-count-weighted combination with one or more other stacks,
+        ring by ring.
+
+        Applies :meth:`StructureFunction2D.combine` at every reference
+        radius. The main use here is averaging many noise-only
+        realizations into a single mean noise stack (the expected noise
+        ``S_2`` per ring) before passing it to :meth:`subtract` -- so a
+        single realization's scatter is not injected into the recovered
+        signal.
+
+        Args:
+            others (StructureFunction2DStack or sequence): One or more
+                stacks to combine with this one. Must share ``ref_rs``
+                and per-ring lag grids.
+            n_bins (int): Radial bins for the azimuthal average of each
+                combined ring.
+            log_spaced (bool): Log-spaced radial bins for the result.
+
+        Returns:
+            StructureFunction2DStack: a new stack with combined per-ring
+            ``S_2`` and ``counts``. Each ring carries ``combined_error``
+            and ``combined_std`` as set by
+            :meth:`StructureFunction2D.combine`.
+        """
+        if isinstance(others, StructureFunction2DStack):
+            others = [others]
+        others = list(others)
+        self._check_ref_rs(others, "combine")
+        results = [
+            self.results[i].combine([o.results[i] for o in others],
+                                    n_bins=n_bins, log_spaced=log_spaced)
+            for i in range(len(self))
+        ]
+        return type(self)(
+            ref_rs=self.ref_rs, ref_band=self.ref_band, results=results,
+            x_grid=self.x_grid, y_grid=self.y_grid, gridded=self.gridded,
+        )
+
+    def collapse(self, n_bins=50, log_spaced=False):
+        """Collapse the reference-radius axis into one global ``StructureFunction2D``.
+
+        Pair-count-weighted combination of the per-annulus results
+        (:meth:`StructureFunction2D.combine` across this stack's own
+        ``results``), i.e. every lag cell is averaged over reference radii
+        weighted by its pair count -- equivalently, all pairs from every
+        annulus are pooled. Returns a single :class:`StructureFunction2D`
+        with no reference annulus (``ref=None``).
+
+        Note this differs from :meth:`combine`, which combines *across
+        stacks* (e.g. realizations) ring-by-ring and returns a stack. This
+        collapses *within* one stack, across ``ref_rs``, and returns a
+        single result.
+
+        When the reference annuli tile the field without overlap or gaps
+        (e.g. ``ref_band=0`` over every radial ring, as
+        ``compute_structure_function_stack`` produces), the on-axis radial
+        and azimuthal slices (:attr:`S2_x`, :attr:`S2_y`) and the
+        azimuthal-average profile (:attr:`S2_i`) match the true global
+        ``S_2`` -- ``StructureFunction2D.from_array(field, ref_i=-1)`` --
+        exactly, so the radial/azimuthal heatmaps and 1D profiles collapse
+        exactly. The full 2D :attr:`S2` surface, however, differs off the
+        axes: the reference-annulus kernel mirror-fills the azimuthal lag
+        (``S2[dr, +dphi] = S2[dr, -dphi]``), averaging the diagonal ridge
+        away, so any off-axis / 2D structure (e.g. a pitch or grand-design
+        ridge) is *not* the global result -- compute ``ref_i=-1`` directly
+        for that. With overlapping bands shared pixels are over-weighted and
+        with gaps some pairs are missing, degrading even the on-axis match.
+
+        The ``counts`` of the collapse reflect the reference-anchoring
+        convention (each pair counted per anchoring annulus), so their
+        absolute values differ from a direct global; the count-weighted
+        ``S_2`` is the meaningful output.
+
+        This collapses the RAW ``S_2``. To collapse the row-normalized or
+        anisotropy heatmaps, collapse first and normalize / ratio the
+        result -- those transforms are nonlinear and must not be averaged
+        across radii.
+
+        Args:
+            n_bins (int): Radial bins for the azimuthal-average profile.
+            log_spaced (bool): Log-spaced radial bins.
+
+        Returns:
+            StructureFunction2D: the count-weighted collapse, ``ref=None``,
+            carrying ``combined_error`` / ``combined_std`` from
+            :meth:`StructureFunction2D.combine`.
+        """
+        collapsed = self.results[0].combine(self.results[1:], n_bins=n_bins,
+                                            log_spaced=log_spaced)
+        collapsed.ref = None
+        collapsed.ref_band = None
+        collapsed.symmetrized = self.symmetrized
+        return collapsed
+
+    def plateaus(self, frac=0.5, stat="median"):
+        """Per-annulus large-lag plateau, shape ``(N_ref,)``.
+
+        Maps :meth:`StructureFunction2D.plateau` over the stack.
+        """
+        return np.array([r.plateau(frac=frac, stat=stat) for r in self.results])
+
+    def half_power_lags(self, axis="x", level=0.5):
+        """Per-annulus half-power lag along ``axis``, shape ``(N_ref,)``.
+
+        Maps :meth:`StructureFunction2D.half_power_lag` over the stack.
+        ``axis='x'`` returns radial lags in arcsec; ``axis='y'`` azimuthal
+        lags in degrees (convert to arclength with ``np.radians(.) * ref_rs``).
+        """
+        return np.array([r.half_power_lag(axis=axis, level=level)
+                         for r in self.results])
+
+    def reliability_weights(self, kind="counts"):
+        """Per-annulus reliability weights, shape ``(N_ref,)``.
+
+        Maps :meth:`StructureFunction2D.reliability_weight` over the stack;
+        use to weight per-annulus quantities when collapsing across radius.
+        """
+        return np.array([r.reliability_weight(kind=kind) for r in self.results])
+
+    # Order of the GRF parameters in the (log-)sampling vector.
+    def _grf_setup(self, r0, r_range, sigma_maps, floor_frac, p0):
+        """Shared setup for :meth:`fit_GRF`: select annuli and build the
+        residual / model-evaluation closures used by both back-ends.
+
+        Returns ``(idx, sel, plateau, parts, est)`` where ``parts(mp)`` takes a
+        linear model-parameter dict (``sigma, alphar, ell0r, ell0phi,
+        alphaphi``) and returns ``(resid_raw, weights)`` -- the un-normalised
+        ``model - data`` residual and the matching weight array, concatenated
+        over the selected annuli's radial and azimuthal slices -- and ``est`` is
+        the dict of linear-space initial estimates (see
+        :meth:`_grf_initial_guess`).
+        """
+        idx = np.arange(len(self))
+        if r_range is not None:
+            lo, hi = r_range
+            idx = idx[(self.ref_rs >= lo) & (self.ref_rs <= hi)]
+        if idx.size == 0:
+            raise ValueError("r_range selected no annuli.")
+
+        rr = self.ref_rs
+        sel = [self.results[i] for i in idx]
+
+        # Empty lag bins (no finite pairs) are returned as exactly 0 by the
+        # kernel -- they are not measurements. Mask them so they neither drag
+        # the model toward zero nor count toward the plateau / weighting.
+        masks_x = [s.counts[s.max_lag_x:, s.max_lag_y] > 0 for s in sel]
+        masks_y = [s.counts[s.max_lag_x, s.max_lag_y:] > 0 for s in sel]
+        plateau = np.nanmax([np.nanmax(np.abs(s.S2_x[m])) if m.any() else 0.0
+                             for s, m in zip(sel, masks_x)])
+        if not plateau > 0:
+            raise ValueError(
+                "No finite pairs in the selected annuli/lags -- check "
+                "`r_range`, the deprojection mask, and `max_lag_x`.")
+        floor = floor_frac * plateau
+
+        def parts(mp):
+            resid, weights = [], []
+            for j, (i, mx, my) in enumerate(zip(idx, masks_x, masks_y)):
+                s = self.results[i]
+                p = grf_s2_slices(rr[i], s.lags_x, s.lags_y, sigma=mp["sigma"],
+                                  alphar=mp["alphar"], ell0r=mp["ell0r"],
+                                  alphaphi=mp["alphaphi"], ell0phi=mp["ell0phi"],
+                                  r0=r0)
+                if sigma_maps is not None:
+                    wr, wp = sigma_maps[j]
+                else:
+                    wr = np.maximum(np.abs(s.S2_x), floor)
+                    wp = np.maximum(np.abs(s.S2_y), floor)
+                resid += [(p["S2_r"] - s.S2_x)[mx],
+                          (p["S2_phi"] - s.S2_y)[my]]
+                weights += [np.asarray(wr)[mx], np.asarray(wp)[my]]
+            return np.concatenate(resid), np.concatenate(weights)
+
+        est = self._grf_initial_guess(idx, r0, p0)
+        return idx, sel, plateau, parts, est
+
+    def _grf_initial_guess(self, idx, r0, p0):
+        """Heuristic starting point for :meth:`fit_GRF`, as a dict of
+        linear-space estimates ``{sigma, alphar, ell0r, ell0phi, alphaphi}``.
+
+        Each parameter is seeded from the scalar heuristics rather than a fixed
+        guess, which keeps the optimiser away from the ``sigma``-amplitude-scale
+        plateau degeneracy:
+
+        * ``sigma`` from the robust plateau (``plateau = 2 sigma^2``), i.e. the
+          data standard deviation;
+        * ``ell_r`` per annulus from the radial half-power lag
+          (``hp ~ 1.177 ell_r`` for a Gaussian), fit in ln-ln vs radius -> the
+          slope is ``alphar`` and the value at ``r0`` is ``ell0r``;
+        * ``ell_phi`` (arc length) per annulus from the azimuthal half-power
+          lag, fit the same way -> ``alphaphi`` and ``ell0phi``.
+
+        When a heuristic is unavailable (too few resolved annuli) it falls back
+        to ``ell0r = 5 dx``, ``alphar = 0``, an isotropic ``ell0phi = ell0r``,
+        ``alphaphi = alphar`` and ``sigma`` from the plateau. ``p0`` (a dict
+        with any of ``sigma``, ``alphar``, ``ell0r``, ``ell0phi``, ``alphaphi``)
+        overrides the corresponding heuristic.
+        """
+        sel = [self.results[i] for i in idx]
+        rr = self.ref_rs[idx]
+        dx = self.results[0].dx
+
+        guess = dict(sigma=None, alphar=None, ell0r=None,
+                     ell0phi=None, alphaphi=None)
+        if p0:
+            guess.update(p0)
+
+        # sigma from the robust plateau (= 2 sigma^2 = 2 * data variance).
+        plateau = np.nanmedian([s.plateau() for s in sel])
+        sigma0 = (guess["sigma"] if guess["sigma"] is not None
+                  else np.sqrt(max(plateau, 0.0) / 2.0))
+
+        # Per-annulus correlation lengths from the half-power lags.
+        hp_x = np.array([s.half_power_lag("x") for s in sel])
+        hp_y = np.array([s.half_power_lag("y") for s in sel])
+        w = np.array([s.reliability_weight() for s in sel])
+        ell_r = hp_x / 1.177                          # arcsec
+        ell_phi = np.radians(hp_y) * rr / 1.177       # arcsec (arc length)
+
+        def _loglog(ell, slope_guess, intercept_guess, iso_fallback):
+            """(slope, value-at-r0) from a reliability-weighted ln-ln fit."""
+            slope, val0 = slope_guess, intercept_guess
+            if slope is not None and val0 is not None:
+                return slope, max(val0, dx)
+            ok = np.isfinite(ell) & (ell > 0) & np.isfinite(w) & (w > 0)
+            if ok.sum() >= 2:
+                m, c = np.polyfit(np.log(rr[ok]), np.log(ell[ok]), 1,
+                                  w=np.sqrt(w[ok]))
+                if slope is None:
+                    slope = m
+                if val0 is None:
+                    val0 = np.exp(c + m * np.log(r0))
+            else:
+                if slope is None:
+                    slope = 0.0
+                if val0 is None:
+                    val0 = ell[ok][0] if ok.any() else iso_fallback
+            return slope, max(val0, dx)
+
+        alphar0, ell0r0 = _loglog(ell_r, guess["alphar"], guess["ell0r"],
+                                  5.0 * dx)
+        # Azimuthal scale: seed from ell_phi(r); fall back to isotropic.
+        alphaphi0, ell0phi0 = _loglog(ell_phi, guess["alphaphi"],
+                                      guess["ell0phi"], ell0r0)
+
+        return dict(sigma=float(sigma0), alphar=float(alphar0),
+                    ell0r=float(ell0r0), ell0phi=float(ell0phi0),
+                    alphaphi=float(alphaphi0))
+
+    def fit_GRF(self, r0=1.0, r_range=None, sigma_maps=None, floor_frac=0.05,
+                method="lsq", p0=None, bounds=None, priors=None, jitter=True,
+                fit_alphaphi=False, nwalkers=64, nburnin=500, nsteps=1000,
+                scatter=1e-3, plots=None, returns=None, pool=None,
+                progress=True):
+        """Fit the anisotropic-GRF parameters to the stack's ``S_2`` slices.
+
+        Fits :func:`grf_s2_slices` jointly to the measured radial (``S2_x``)
+        and azimuthal (``S2_y``) slices across all annuli, solving for the field
+        whose radial correlation length is ``ell_r(r) = ell0r (r / r0)**alphar``
+        and whose azimuthal (arc-length) length is
+        ``ell_phi(r) = ell0phi (r / r0)**alphaphi``. The plateau is
+        ``2 sigma^2`` and the (radius-dependent) anisotropy ``ell_phi / ell_r``
+        is a derived quantity.
+
+        By default ``alphaphi`` is tied to ``alphar`` (a radius-independent
+        anisotropy), so the fit solves for ``(sigma, alphar, ell0r, ell0phi)`` --
+        the same dimensionality as the historical ``(sigma, alpha, A, ell0)``
+        model, just with the azimuthal amplitude fit directly as ``ell0phi``
+        instead of ``A = ell0phi/ell0r``. Set ``fit_alphaphi=True`` to free the
+        azimuthal slope and measure a radius-dependent anisotropy.
+
+        Both back-ends work in log space for the positive parameters
+        (``log sigma, alphar, log ell0r, log ell0phi[, alphaphi]``) so those
+        stay positive and the priors are flat in log.
+
+        * ``method='lsq'`` (default): a fast Levenberg-Marquardt-style
+          least-squares point estimate with a Gauss-Newton covariance.
+        * ``method='mcmc'``: an ``emcee`` ensemble sampler, initialised from
+          the least-squares solution, that returns the full posterior. The
+          likelihood is Gaussian in the slice residuals weighted by
+          ``sigma_maps`` (or the default weighting); with ``jitter=True`` an
+          extra log-scale nuisance parameter ``s`` multiplies every weight
+          (variance ``(s w)**2``), marginalising over an imperfect overall
+          uncertainty scale so the posterior widths are calibrated. Because
+          the default weighting is a heuristic scale rather than a true
+          uncertainty, supply ``sigma_maps`` (e.g. the bootstrap ``S_2``
+          scatter) for trustworthy credible intervals.
+
+        Args:
+            r0 (float): Reference radius [arcsec] in
+                ``ell_r(r) = ell0r (r / r0)**alphar``.
+            r_range (Optional[tuple]): ``(r_lo, r_hi)`` [arcsec] to fit only
+                annuli in that range -- e.g. to skip unresolved inner radii
+                where ``ell_r`` falls below the pixel scale. Defaults to all
+                annuli.
+            sigma_maps (Optional[list]): Per-annulus ``(sigma_r, sigma_phi)``
+                1D uncertainty arrays used as residual weights, ordered to
+                match the selected annuli. If ``None``, uses
+                ``max(|S_2|, floor)`` since the scatter scales with ``S_2``.
+            floor_frac (float): Floor for the default weighting, as a fraction
+                of the ``S_2`` plateau.
+            method ({'lsq', 'mcmc'}): Back-end selector.
+            p0 (Optional[dict]): Override the heuristic starting guess for any
+                of ``sigma``, ``alphar``, ``ell0r``, ``ell0phi``, ``alphaphi``
+                (linear space). Keys left out are seeded from the scalar
+                heuristics (plateau, half-power lags, reliability weights); see
+                :meth:`_grf_initial_guess`.
+            bounds (Optional[dict]): Flat-prior bounds (``mcmc`` only) in
+                linear space per key ``sigma``, ``alphar``, ``ell0r``,
+                ``ell0phi``, ``alphaphi``, ``jitter``; each a ``(lo, hi)``
+                tuple. Missing keys keep wide defaults.
+            priors (Optional[dict]): Gaussian priors (``mcmc`` only) added on
+                top of the flat bounds, keyed the same way; each a
+                ``(mu, sigma)`` tuple in *sampling* space -- natural-log for
+                ``sigma``, ``ell0r``, ``ell0phi``, ``jitter`` and linear for
+                ``alphar``, ``alphaphi``. Missing keys stay flat.
+            jitter (bool): ``mcmc`` only. Add the log-scale nuisance parameter
+                (recommended). Adds a trailing ``s`` column to ``samples``.
+            fit_alphaphi (bool): If ``True``, free the azimuthal slope
+                ``alphaphi`` as its own parameter (a radius-dependent
+                anisotropy). Default ``False`` ties ``alphaphi = alphar``.
+            nwalkers, nburnin, nsteps (int): ``emcee`` ensemble size and step
+                counts (``mcmc`` only). ``nwalkers`` is raised to at least
+                ``2 * ndim``.
+            scatter (float): Fractional scatter of the initial walker ball
+                about the least-squares solution.
+            plots (Optional[list]): ``mcmc`` only. Diagnostic plots to draw,
+                any of ``'walkers'``, ``'corner'``, ``'bestfit'`` (model vs.
+                measured slices), or ``'none'``. Defaults to
+                ``['walkers', 'corner']``.
+            returns (Optional[list]): ``mcmc`` only. Items to return, any of
+                ``'samples'`` (the flattened post-burn-in chain in *linear*
+                space, columns aligned to the active keys ``[sigma, alphar,
+                ell0r, ell0phi(, alphaphi)(, s)]``), ``'sampler'`` (the
+                ``emcee.EnsembleSampler``), ``'lnprob'`` (the flattened
+                log-probability), ``'percentiles'`` (the ``(3, ndim)`` 16/50/84
+                array), ``'dict'`` (the median parameters keyed by name), or
+                ``'none'``. Defaults to ``['samples']`` -- the full posterior,
+                from which percentiles and medians can both be derived.
+            pool: Optional worker pool passed to ``emcee.EnsembleSampler``.
+            progress (bool): Show the ``emcee`` progress bar.
+
+        Returns:
+            For ``method='lsq'``: ``(params, perr, sol, cov)`` -- best-fit and
+            formal 1-sigma dicts keyed by the active sampled parameters
+            (``sigma, alphar, ell0r, ell0phi`` and, if ``fit_alphaphi``,
+            ``alphaphi``), the raw ``scipy.optimize.least_squares`` result, and
+            the covariance in sampling space. When ``alphaphi`` is tied it is
+            also added to ``params`` (equal to ``alphar``) so the dict is a
+            complete field spec, but without a ``perr`` entry.
+
+            For ``method='mcmc'``: whatever ``returns`` selects (a single
+            object if only one item, else a list in the order above);
+            ``None`` if ``returns=['none']``.
+        """
+        from scipy.optimize import least_squares
+
+        idx, sel, plateau, parts, est = self._grf_setup(
+            r0, r_range, sigma_maps, floor_frac, p0)
+
+        # Model (no-jitter) sampling keys drive the LM solve; jitter is added
+        # only for the MCMC stage below.
+        model_keys = _grf_sample_keys(fit_alphaphi=fit_alphaphi)
+        x0 = _grf_x0(model_keys, est)
+
+        def resid(theta):
+            r_raw, w = parts(_grf_unpack(theta, model_keys))
+            return r_raw / w
+
+        # The optimiser can probe large log-parameters (np.exp -> overflow);
+        # those warnings are harmless here, so silence them during the solve.
+        with np.errstate(over="ignore", invalid="ignore"):
+            sol = least_squares(resid, x0, method="trf")
+
+        if method == "lsq":
+            mp = _grf_unpack(sol.x, model_keys)
+            J = sol.jac                               # Gauss-Newton covariance
+            dof = max(J.shape[0] - J.shape[1], 1)
+            cov = np.linalg.inv(J.T @ J) * (2.0 * sol.cost / dof)
+            params = {k: mp[k] for k in model_keys}
+            perr = _grf_perr(model_keys, mp, cov)
+            if "alphaphi" not in params:              # tied: report for clarity
+                params["alphaphi"] = mp["alphaphi"]
+            return params, perr, sol, cov
+
+        if method != "mcmc":
+            raise ValueError(
+                "method must be 'lsq' or 'mcmc', got {!r}.".format(method))
+
+        import emcee
+        from .helper_functions import random_p0, plot_walkers, plot_corner
+
+        keys = _grf_sample_keys(fit_alphaphi=fit_alphaphi, jitter=jitter)
+        lo, hi = _grf_bounds_from_keys(keys, bounds)
+        pmu, psd = _grf_prior_arrays_from_keys(keys, priors)
+        theta0 = list(sol.x) + ([0.0] if jitter else [])
+        ndim = len(theta0)
+        log_labels, lin_labels = _grf_labels(keys)
+        print("Assuming:\n\tp0 = [%s]."
+              % (", ".join(la.replace("$", "") for la in lin_labels)))
+
+        def ln_prob(theta):
+            if np.any(theta < lo) or np.any(theta > hi):
+                return -np.inf
+            mp = _grf_unpack(theta, keys)
+            r_raw, w = parts(mp)
+            if not np.all(np.isfinite(r_raw)):
+                return -np.inf
+            var = (mp["s"] ** 2 if jitter else 1.0) * w ** 2
+            ln_like = -0.5 * np.sum(r_raw ** 2 / var
+                                    + np.log(2.0 * np.pi * var))
+            ln_prior = -0.5 * np.sum(((theta - pmu) / psd) ** 2)
+            return ln_like + ln_prior
+
+        nwalkers = max(int(nwalkers), 2 * ndim)
+        p0_ball = random_p0(theta0, scatter, nwalkers)
+        with np.errstate(over="ignore", invalid="ignore"):
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, ln_prob, pool=pool)
+            sampler.run_mcmc(p0_ball, int(nburnin) + int(nsteps),
+                             progress=progress)
+
+        # Posterior samples in linear space: exponentiate the log-sampled cols.
+        chain = sampler.get_chain(discard=int(nburnin), flat=True)
+        cols = [np.exp(chain[:, n]) if k in _GRF_LOG_SAMPLED else chain[:, n]
+                for n, k in enumerate(keys)]
+        samples = np.column_stack(cols)
+
+        # Diagnostic plots (mirrors rotationmap.fit_map).
+        if plots is None:
+            plots = ["walkers", "corner"]
+        plots = np.atleast_1d(plots)
+        if "none" in plots:
+            plots = []
+        if "walkers" in plots:
+            walkers = np.transpose(sampler.get_chain(), (2, 0, 1))
+            plot_walkers(walkers, int(nburnin), log_labels)
+        if "corner" in plots:
+            plot_corner(samples, lin_labels)
+        if "bestfit" in plots:
+            self._plot_grf_bestfit(idx, r0,
+                                   _grf_unpack(np.median(chain, axis=0), keys))
+
+        # Output (mirrors rotationmap.fit_map's `returns` mechanism).
+        if returns is None:
+            returns = ["samples"]
+        returns = np.atleast_1d(returns)
+        if "none" in returns:
+            return None
+        pct = np.percentile(samples, [16, 50, 84], axis=0)
+        medians = {k: pct[1, n] for n, k in enumerate(keys)}
+        to_return = []
+        if "samples" in returns:
+            to_return += [samples]
+        if "sampler" in returns:
+            to_return += [sampler]
+        if "lnprob" in returns:
+            to_return += [sampler.get_log_prob(discard=int(nburnin), flat=True)]
+        if "percentiles" in returns:
+            to_return += [pct]
+        if "dict" in returns:
+            to_return += [medians]
+        return to_return if len(to_return) > 1 else to_return[0]
+
+    def _plot_grf_bestfit(self, idx, r0, mp, axes=None):
+        """Overlay the model (lines) on the measured (points) radial and
+        azimuthal ``S_2`` slices for the fitted annuli -- the goodness-of-fit
+        gate. ``mp`` is a linear model-parameter dict (``sigma, alphar, ell0r,
+        ell0phi, alphaphi``; see :func:`_grf_unpack`)."""
+        import matplotlib.pyplot as plt
+
+        if axes is None:
+            _, axes = plt.subplots(1, 2, figsize=(9.0, 3.6),
+                                   constrained_layout=True)
+        rr = self.ref_rs
+        n = max(len(idx) - 1, 1)
+        cmap = plt.get_cmap("viridis")
+        for k, i in enumerate(idx):
+            s = self.results[i]
+            c = cmap(k / n)
+            p = grf_s2_slices(rr[i], s.lags_x, s.lags_y, sigma=mp["sigma"],
+                              alphar=mp["alphar"], ell0r=mp["ell0r"],
+                              alphaphi=mp["alphaphi"], ell0phi=mp["ell0phi"],
+                              r0=r0)
+            # Hide empty (zero-count) lag bins, as the fit does.
+            mx = s.counts[s.max_lag_x:, s.max_lag_y] > 0
+            my = s.counts[s.max_lag_x, s.max_lag_y:] > 0
+            axes[0].plot(s.lags_x[mx], s.S2_x[mx], ".", color=c, ms=3)
+            axes[0].plot(s.lags_x[mx], p["S2_r"][mx], "-", color=c, lw=1.0)
+            axes[1].plot(s.lags_y[my], s.S2_y[my], ".", color=c, ms=3)
+            axes[1].plot(s.lags_y[my], p["S2_phi"][my], "-", color=c, lw=1.0,
+                         label=r"$r={:.2f}$".format(rr[i]))
+        axes[0].set(xlabel=r"$\ell_r$ (arcsec)", ylabel=r"$S_2$",
+                    title="radial slice")
+        axes[1].set(xlabel=r"$\Delta\phi$ (deg)", title="azimuthal slice")
+        axes[1].legend(fontsize=6, ncol=2)
+        return axes
 
     _NORMALIZE_LABELS = {
         None: r"$S_2$",
@@ -1217,7 +3104,8 @@ class StructureFunction2DStack:
         X = self.lags_x_full if two_sided else self.lags_x
         return X, self.ref_rs, C
 
-    def calculate_anisotropy_heatmap(self, lag_floor=None, two_sided=None):
+    def calculate_anisotropy_heatmap(self, lag_floor=None, two_sided=None,
+                                     log=False):
         """Return ``(X, Y, C)`` for the ``S_2_phi / S_2_r`` anisotropy heatmap.
 
         Compares the azimuthal and radial structure functions at the same
@@ -1246,13 +3134,22 @@ class StructureFunction2DStack:
                 ``dr`` share the same azimuthal normalisation; any L/R
                 asymmetry in the ratio then comes from the radial
                 outward/inward statistics (i.e. non-stationarity).
+            log (bool): If ``True``, return ``log10`` of the ratio instead
+                of the ratio itself (the name is ``log`` for brevity, but it
+                is base-10, not natural). Since the anisotropy is
+                multiplicative (``1/A^2`` at small lag, ``1`` at large lag),
+                the log is symmetric about ``0`` (isotropic), with negative
+                values for azimuthally-elongated and positive for
+                radially-elongated structure. Non-positive ratios map to
+                ``np.nan``.
 
         Returns:
             X (ndarray): Radial lag axis [arcsec] — 1D ``(2*mlx+1,)``
                 if ``two_sided``, else ``(mlx+1,)``.
             Y (ndarray): ``ref_rs``, 1D ``(N_ref,)`` in arcsec.
-            C (ndarray): The anisotropy ratio, shape ``(N_ref, len(X))``,
-                with ``np.nan`` where ``|L| <= lag_floor``.
+            C (ndarray): The anisotropy ratio (or its ``log10`` if
+                ``log=True``), shape ``(N_ref, len(X))``, with ``np.nan``
+                where ``|L| <= lag_floor``.
         """
         if two_sided is None:
             two_sided = not self.symmetrized
@@ -1272,7 +3169,59 @@ class StructureFunction2DStack:
         with np.errstate(invalid="ignore", divide="ignore"):
             ratio = np.where(np.abs(Xr)[None, :] > lag_floor,
                              Ca_on_Xr / Cr, np.nan)
+            if log:
+                ratio = np.where(ratio > 0, np.log10(ratio), np.nan)
         return Xr, self.ref_rs, ratio
+
+    def pairwise_error_heatmaps(self, two_sided=None, arclength=False):
+        """Per-cell 1-sigma uncertainty on the radial and azimuthal ``S_2``
+        heatmaps from Gaussian pair statistics: ``sigma = S2 * sqrt(2 / N_pairs)``.
+
+        For a Gaussian field the increment at lag ``l`` is ``N(0, S2(l))``,
+        so each squared increment is ``S2 * chi^2_1`` (variance ``2 S2^2``)
+        and the pair-count average has variance ``2 S2^2 / N_pairs``. The
+        returned arrays share the ``(X, Y)`` axes of
+        :meth:`calculate_radial_heatmap` / :meth:`calculate_azimuthal_heatmap`
+        (with ``normalize=None``), so they drop onto the same ``pcolormesh``
+        as an error layer.
+
+        .. warning::
+            This is an **optimistic lower bound**. It assumes the pairs are
+            independent, but real pairs share endpoints and -- more
+            importantly -- the field is correlated, so the effective number
+            of independent samples is ``N_eff << N_pairs``. The true scatter
+            is larger by roughly ``sqrt(N_pairs / N_eff)``: negligible when
+            the correlation length is near the pixel scale, but an order of
+            magnitude or more once it spans many pixels. For an honest
+            uncertainty, use the per-cell standard deviation across many
+            realizations (Monte Carlo).
+
+        Args:
+            two_sided (Optional[bool]): Controls the radial axis, as in
+                :meth:`calculate_radial_heatmap`. ``None`` (default) follows
+                :attr:`symmetrized`.
+            arclength (Optional[bool]): Controls the azimuthal axis, as in
+                :meth:`calculate_azimuthal_heatmap`.
+
+        Returns:
+            dict with keys ``'radial'`` and ``'azimuthal'``, each an
+            ``(X, Y, sigma)`` tuple matching the corresponding
+            ``calculate_*_heatmap`` return (``normalize=None``).
+        """
+        if two_sided is None:
+            two_sided = not self.symmetrized
+
+        Xr, Yr, S2r = self.calculate_radial_heatmap(two_sided=two_sided,
+                                                     normalize=None)
+        Nr = self.counts_x_full_stack if two_sided else self.counts_x_stack
+        sigma_r = np.abs(S2r) * np.sqrt(2.0 / np.maximum(Nr, 1.0))
+
+        Xa, Ya, S2a = self.calculate_azimuthal_heatmap(arclength=arclength,
+                                                        normalize=None)
+        sigma_a = np.abs(S2a) * np.sqrt(2.0 / np.maximum(self.counts_y_stack, 1.0))
+
+        return {"radial": (Xr, Yr, sigma_r),
+                "azimuthal": (Xa, Ya, sigma_a)}
 
     def plot_azimuthal_heatmap(self, ax=None, return_fig=False,
                                arclength=False, normalize=None,
@@ -1346,7 +3295,7 @@ class StructureFunction2DStack:
         return fig if return_fig else None
 
     def plot_anisotropy_heatmap(self, ax=None, return_fig=False,
-                                lag_floor=None, two_sided=None,
+                                lag_floor=None, two_sided=None, log=False,
                                 **pcolormesh_kwargs):
         """Heatmap of ``S_2_phi / S_2_r`` vs ``(ref_r, lag)``. Thin
         wrapper around :meth:`calculate_anisotropy_heatmap`.
@@ -1360,6 +3309,8 @@ class StructureFunction2DStack:
                 :meth:`calculate_anisotropy_heatmap`.
             two_sided (Optional[bool]): See
                 :meth:`calculate_anisotropy_heatmap`.
+            log (bool): Plot ``log10`` of the ratio (symmetric about 0,
+                isotropic). See :meth:`calculate_anisotropy_heatmap`.
         """
         import matplotlib.pyplot as plt
 
@@ -1369,7 +3320,8 @@ class StructureFunction2DStack:
             fig = ax.figure
 
         X, Y, C = self.calculate_anisotropy_heatmap(lag_floor=lag_floor,
-                                                    two_sided=two_sided)
+                                                    two_sided=two_sided,
+                                                    log=log)
 
         kwargs = dict(shading="auto", rasterized=True)
         kwargs.update(pcolormesh_kwargs)
@@ -1377,7 +3329,8 @@ class StructureFunction2DStack:
         ax.set_xlabel(r"$\ell$ (arcsec)")
         ax.set_ylabel(r"$r_{\rm ref}$ (arcsec)")
         cbar = fig.colorbar(pcm, ax=ax, pad=0.02)
-        cbar.ax.set_ylabel(r"$S_2^\phi / S_2^r$",
+        cbar.ax.set_ylabel(r"$\log_{10}(S_2^\phi / S_2^r)$" if log
+                           else r"$S_2^\phi / S_2^r$",
                            rotation=270, labelpad=13)
         return fig if return_fig else None
 
@@ -1463,3 +3416,66 @@ class StructureFunction2DStack:
                 ax.axhline(r, **rk)
 
         return fig if return_fig else None
+
+
+def structure_function_ensemble(fields, *, mode="global", dx=1.0, dy=1.0,
+                                ref_rs=None, x_axis=None, ref_band=0.0,
+                                max_lag_x=None, max_lag_y=None,
+                                n_bins=50, log_spaced=False, symmetrize=True,
+                                azimuthal_axis="y", x_label="lag_x",
+                                y_label="lag_y", y_grid=None):
+    """Build a per-realization ensemble from a 3D stack of fields.
+
+    Given ``fields`` of shape ``(N, n_x, n_y)``, returns a list of N results
+    -- one per field -- WITHOUT averaging across realizations. Contrast
+    :meth:`StructureFunction2D.combine` (and passing a 3D array to a helper
+    that combines), which POOLS the realizations into a single result; this
+    keeps them separate so you can take the per-cell / per-statistic scatter
+    across the realization axis (np.std / np.percentile).
+
+    Args:
+        fields (ndarray): 3D array ``(N, n_x, n_y)`` (axis 1 = radius,
+            axis 2 = azimuth).
+        mode ({'global', 'stack'}):
+            ``'global'`` (default) -- one :class:`StructureFunction2D` per
+                field over the whole field (``ref_i = -1``): N global S_2.
+            ``'stack'`` -- one :class:`StructureFunction2DStack` per field at
+                ``ref_rs`` (requires ``ref_rs``): N radius-resolved stacks.
+        dx, dy, ref_band, max_lag_x, max_lag_y, n_bins, log_spaced,
+            symmetrize, azimuthal_axis, x_label, y_label, y_grid: forwarded to
+            the per-field constructor (``max_lag_*`` in pixels).
+        ref_rs (sequence of float): Reference radii, required for
+            ``mode='stack'``.
+        x_axis (Optional[ndarray]): Axis-1 (radial) coordinate for
+            ``mode='stack'`` ref-radius matching; defaults to
+            ``np.arange(n_x) * dx``.
+
+    Returns:
+        list: N :class:`StructureFunction2D` (``mode='global'``) or N
+        :class:`StructureFunction2DStack` (``mode='stack'``).
+    """
+    fields = np.asarray(fields)
+    if fields.ndim != 3:
+        raise ValueError("fields must be 3D (N, n_x, n_y); got shape {}."
+                         .format(fields.shape))
+
+    if mode == "global":
+        return [StructureFunction2D.from_array(
+                    f, dx=dx, dy=dy, max_lag_x=max_lag_x, max_lag_y=max_lag_y,
+                    ref_i=-1, n_bins=n_bins, log_spaced=log_spaced,
+                    symmetrize=symmetrize, azimuthal_axis=azimuthal_axis,
+                    x_label=x_label, y_label=y_label)
+                for f in fields]
+
+    if mode == "stack":
+        if ref_rs is None:
+            raise ValueError("mode='stack' requires ref_rs.")
+        return [StructureFunction2DStack.from_array(
+                    f, ref_rs, x_axis=x_axis, dx=dx, dy=dy, ref_band=ref_band,
+                    max_lag_x=max_lag_x, max_lag_y=max_lag_y, n_bins=n_bins,
+                    log_spaced=log_spaced, symmetrize=symmetrize,
+                    azimuthal_axis=azimuthal_axis, x_label=x_label,
+                    y_label=y_label, y_grid=y_grid)
+                for f in fields]
+
+    raise ValueError("mode must be 'global' or 'stack', got {!r}.".format(mode))
