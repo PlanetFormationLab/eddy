@@ -2576,7 +2576,123 @@ class StructureFunction2DStack:
         """
         return np.array([r.reliability_weight(kind=kind) for r in self.results])
 
-    # Order of the GRF parameters in the (log-)sampling vector.
+    def measure_heuristics(self, r_min=None, r_max=None, t1c_arclength=True,
+                           rescale_returns=True):
+        """Scalar heuristics characterising this structure-function stack.
+
+        Six numbers summarising the field's amplitude, correlation lengths,
+        anisotropy and (radial) stationarity, built from the per-annulus
+        :meth:`half_power_lags`, :meth:`reliability_weights` (``neff``) and the
+        collapsed :meth:`plateau`. They map onto the anisotropic-GRF parameters
+        fit by :meth:`fit_GRF` (``T1a`` -> ``sigma``, ``T1b`` -> ``ell0r``,
+        ``T1c`` -> ``ell0phi``, ``T2`` -> anisotropy ``A``, ``T3`` -> ``alphar``,
+        ``T4`` -> ``alphaphi - 1``), but are model-free per-ring measurements,
+        not a fit.
+
+        Args:
+            r_min, r_max (Optional[float]): restrict every cross-ring average
+                and slope to annuli with ``ref_rs`` in ``[r_min, r_max]``
+                (arcsec). Either bound may be ``None`` (open on that side);
+                ``None, None`` uses the full stack. Use this to confine the
+                heuristics to the radial band the ``neff`` weights concentrate
+                on, and to drop poorly-deprojected inner annuli (sparse
+                azimuthal sampling, largest ``ell_r / r``, most polar-grid
+                aliasing) that otherwise bias the slopes.
+            t1c_arclength (bool): units of T1c. If ``True`` (default) report the
+                arc length ``s_phi = radians(ell_phi) * ref_rs`` [arcsec],
+                commensurate with ``ell_r`` but folding in the
+                deprojection-uncertain ring radius. If ``False`` report the
+                angular azimuthal scale ``ell_phi`` [deg], measured natively on
+                the deprojected grid (no r multiply, so no inherited radial
+                systematic). (Only T1c is affected; T2 always uses the arc
+                length.)
+            rescale_returns (bool): if ``True`` (default) return the
+                human-facing magnitudes ``sigma_hat = sqrt(T1a / 2)`` and
+                ``A_hat = exp(T2)``; if ``False`` return the raw statistics
+                ``T1a = 2 sigma^2`` (plateau) and ``T2 = log A``. Only the
+                *display* of T1a/T2 changes; all internal averaging stays in the
+                raw (additive) coordinates.
+
+        Returns ``(T1a, T1b, T1c, T2, T3, T4)``:
+            T1a -- plateau ``2 sigma^2`` (raw) or ``sigma_hat`` (rescaled).
+            T1b -- radial correlation length ``ell_r`` [arcsec], neff-weighted
+                   mean over rings.
+            T1c -- azimuthal correlation length, neff-weighted mean over rings:
+                   arc length ``r * ell_phi`` [arcsec] (default) or angular
+                   ``ell_phi`` [deg] if ``t1c_arclength=False``.
+            T2  -- anisotropy ``log A`` (raw) or ``A_hat`` (rescaled): the
+                   neff-weighted mean of ``log(s_phi / ell_r)``, where
+                   ``s_phi = radians(ell_phi) * ref_rs`` is the azimuthal arc
+                   length. A ratio of two-direction *physical* scales, so r
+                   re-enters here. For a radius-dependent anisotropy
+                   (``alphaphi != alphar``) this is the band-averaged
+                   ``log A(r)``; the radial trend lives in T3 - T4.
+            T3  -- radial stationarity: weighted slope of ``log ell_r`` vs
+                   ``log r``. (== ``alphar``.)
+            T4  -- azimuthal stationarity: weighted slope of ``log ell_phi[deg]``
+                   vs ``log r``. Deprojection-robust (no r multiply). Slope ~ 0
+                   => angularly self-similar (wound modes); slope ~ -1 => fixed
+                   physical size (arc length constant). (== ``alphaphi - 1``.)
+                   ``T3 - T4 == 1`` exactly iff the anisotropy is
+                   radius-independent (``alphaphi == alphar``); a departure
+                   measures ``alphar - alphaphi``.
+
+        Note: T1a is measured on the *collapsed* stack and is independent of the
+        radial selection; r_min/r_max only gate the per-ring quantities.
+        """
+        plateau = self.collapse().plateau()
+
+        ell_rs = self.half_power_lags('x')                  # radial scale [arcsec]
+        ell_ps_deg = self.half_power_lags('y')              # azimuthal scale [deg]
+        ell_ps_arc = np.radians(ell_ps_deg) * self.ref_rs   # azimuthal arc length [arcsec]
+        weights = self.reliability_weights('neff')
+
+        # radial band over which the cross-ring averages/slopes are taken
+        in_range = np.ones(self.ref_rs.shape, dtype=bool)
+        if r_min is not None:
+            in_range = np.logical_and(in_range, self.ref_rs >= r_min)
+        if r_max is not None:
+            in_range = np.logical_and(in_range, self.ref_rs <= r_max)
+
+        mask_r = np.logical_and.reduce([np.isfinite(ell_rs), np.isfinite(weights), in_range])
+        mask_p = np.logical_and.reduce([np.isfinite(ell_ps_deg), np.isfinite(weights), in_range])
+        mask_arc = np.logical_and.reduce([np.isfinite(ell_ps_arc), np.isfinite(weights), in_range])
+        if not (mask_r.any() and mask_p.any()):
+            raise ValueError("no annuli in [r_min, r_max] = {}".format((r_min, r_max)))
+
+        T1a = plateau
+        T1b = np.average(ell_rs[mask_r], weights=weights[mask_r])
+        if t1c_arclength:
+            T1c = np.average(ell_ps_arc[mask_arc], weights=weights[mask_arc])   # arc length [arcsec]
+        else:
+            T1c = np.average(ell_ps_deg[mask_p], weights=weights[mask_p])       # angular [deg]
+
+        # anisotropy -- ratio of physical scales, so the arc length (hence r)
+        # is unavoidable. Use the *per-ring* ell_r in the denominator so the
+        # ratio is log(A) on every ring rather than (per-ring arc) / (mean ell_r).
+        mask_rp = np.logical_and(mask_r, mask_arc)
+        T2 = np.average(np.log(ell_ps_arc / ell_rs)[mask_rp], weights=weights[mask_rp])
+
+        # weighted log-log slope of a per-ring scale against ref_rs
+        def _slope(ell, mask):
+            m = np.logical_and(mask, np.logical_and(ell > 0.0, self.ref_rs > 0.0))
+            x = np.log(self.ref_rs)[m]
+            y = np.log(ell)[m]
+            X = np.vstack([x, np.ones_like(x)]).T
+            w = weights[m]
+            return np.linalg.solve(X.T @ (w[:, None] * X), X.T @ (w * y))[0]
+
+        try:
+            T3 = _slope(ell_rs, mask_r)        # radial stationarity     (== alphar)
+            T4 = _slope(ell_ps_deg, mask_p)    # azimuthal stationarity  (== alphaphi - 1)
+        except Exception:
+            T3 = np.nan
+            T4 = np.nan
+
+        if rescale_returns:
+            return np.sqrt(T1a / 2.0), T1b, T1c, np.exp(T2), T3, T4
+        return T1a, T1b, T1c, T2, T3, T4
+
     def _grf_setup(self, r0, r_range, sigma_maps, floor_frac, p0):
         """Shared setup for :meth:`fit_GRF`: select annuli and build the
         residual / model-evaluation closures used by both back-ends.
