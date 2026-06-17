@@ -161,11 +161,13 @@ class rotationmap(momentmap):
                 positions. This is probably only useful if you have no idea
                 about the starting positions for the emission surface or if you
                 want to remove walkers stuck in local minima.
-            optimize_kwargs (Optional[dict]): Kwargs forwarded to
-                ``_optimize_p0`` (and thence ``scipy.optimize.minimize``).
-                Use ``method`` to override ``'L-BFGS-B'`` and ``options`` to
-                pass solver options such as ``ftol`` or ``maxiter``, e.g.
-                ``optimize_kwargs={'options': {'ftol': 1e-6}}``.
+            optimize_kwargs (Optional[dict]): Two supported keys:
+                ``'method'`` (overrides the ``'L-BFGS-B'`` default) and
+                ``'options'`` (a dict of ``scipy.optimize.minimize`` options
+                such as ``ftol`` or ``maxiter``, e.g.
+                ``optimize_kwargs={'options': {'ftol': 1e-6}}``). Any other
+                key raises ``TypeError`` -- solver options must be nested
+                under ``'options'``, not passed at the top level.
 
         Returns:
             to_return (list): Depending on the returns list provided.
@@ -732,6 +734,15 @@ class rotationmap(momentmap):
         options = kwargs.pop('options', {})
         options['maxiter'] = options.pop('maxiter', 10000)
         options['ftol'] = options.pop('ftol', 1e-3)
+        if kwargs:
+            raise TypeError(
+                "_optimize_p0() received unexpected optimize_kwargs "
+                "{}. Supported keys: 'method', 'options' (a dict of "
+                "scipy.optimize.minimize options such as 'maxiter', "
+                "'ftol', 'gtol'). To pass solver options, nest them "
+                "under 'options', e.g. "
+                "optimize_kwargs={{'options': {{'maxiter': 50}}}}.".format(
+                    sorted(kwargs)))
 
         try:
             grad_fn = jax.jit(jax.grad(

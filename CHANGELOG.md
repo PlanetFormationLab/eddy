@@ -5,48 +5,165 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.1.0] – 2026-05-18
+## [3.1.0] – 2026-06-16
 
 ### Added
 - **Structure function analysis.** New `eddy.structurefunction` module
   with a numba-jitted 2D second-order structure function kernel,
   helpers for lag coordinates, axis/azimuthal profile extraction, and
   pair-count weighted combination across realizations. The 1D
-  azimuthal spiral model (`S2phi`, with `m=1,2,3` modes) is included.
+  azimuthal spiral model `S2phi` (with `m=1,2,3` modes) is included.
 - **`StructureFunction2D` result class** holding the 2D `S_2` surface,
-  pair counts, 1D profiles, and the underlying polar grid, plus
-  `.combine(...)`, `.fit_spiral(modes=...)`, `.plot_2d()`, and
-  `.plot_profiles()` helpers. Surfaced at the top level
+  pair counts, 1D profiles, and the underlying polar grid. Methods
+  include `.combine(...)`, `.subtract(...)`, `.compare_to(...)`,
+  `.fit_spiral(modes=...)`, `.plot_2d()`, `.plot_profiles()`, and
+  `.plot_comparison(...)`. Surfaced at the top level
   (`from eddy import StructureFunction2D`).
-- **`momentmap.compute_structure_function(...)`** — applies the
-  structure function to the map after a polar deprojection through
-  `imagecube.polar_deprojection`. Inherited by `rotationmap`, so
-  residual maps from `fit_map` flow through the same entry point.
-- **`momentmap.compute_structure_function_stack(ref_rs, ref_band, ...)`**
-  — sweeps a sequence of reference radii on a single deprojection,
-  returning a `StructureFunction2DStack`. This is the natural workflow
-  for radius-resolved spiral and turbulence-amplitude analyses; the
-  deprojection cost is paid once and only the kernel runs per radius.
 - **`StructureFunction2DStack` container** — list-like over per-radius
   `StructureFunction2D` results, with stacked array properties
-  (`S2_stack`, `S2_x_stack`, `S2_y_stack`, `S2_i_stack`), a batched
-  `.fit_spiral(modes=...)` returning `(popt, perr)` of shape
-  `(N_ref, 1 + len(modes))`, and `.plot_azimuthal_heatmap()` for the
-  ref_r vs azimuthal-lag visualization. Surfaced at the top level
-  (`from eddy import StructureFunction2DStack`).
-- **`structurefunction` optional dependency** — install numba via
-  `pip install astro-eddy[structurefunction]`. `import eddy` works
-  without numba; only the structure-function entry points raise.
-- **Tests.** New `tests/test_structurefunction.py` (12 cases) covering
-  analytic recovery, NaN handling, reference-annulus mode, the
-  result-class combine/fit-spiral helpers, the radius-sweep stack
-  (including single-element-stack equivalence with a direct call),
-  and end-to-end smoke tests through `momentmap.compute_structure_function`
-  and `compute_structure_function_stack`.
+  (`S2_stack`, `S2_x_stack`, `S2_y_stack`, `S2_i_stack`), batched
+  `.fit_spiral(modes=...)`, `.half_power_lags(axis=...)`, the radius
+  vs azimuth/radial-lag heatmaps (`.plot_azimuthal_heatmap()`,
+  `.plot_radial_heatmap()`, `.plot_anisotropy_heatmap()`), and
+  `.plot_gridded()` for the underlying deprojected field. Surfaced at
+  the top level.
+- **`momentmap.compute_structure_function(...)`** and
+  **`compute_structure_function_stack(ref_rs, ref_band, ...)`** —
+  apply the structure function to a moment map after a polar
+  deprojection through `imagecube.polar_deprojection`; the stack
+  variant sweeps reference radii on a single shared deprojection.
+  Inherited by `rotationmap`, so `fit_map` residuals flow through the
+  same entry point.
+- **Anisotropic-GRF forward models.** `grf_s2_slices`,
+  `grf_s2_2d_global`, `predict_s2_slices`, `predict_s2_2d`, and
+  `predict_spiral_s2_2d` — the Paciorek-Schervish-kernel structure
+  functions used to fit `(sigma, alphar, ell0r, ell0phi, alphaphi,
+  pitch)` from data.
+- **`StructureFunction2D.fit_GRF(...)`** — dispatches on construction
+  mode and a `pitch` flag: reference-annulus slice fit, global-mode
+  surface fit, or global-mode surface fit with the pitch freed (the
+  only configuration that resolves the pitch sign). LM (`'lsq'`) and
+  emcee (`'mcmc'`) back-ends share a single internal driver
+  (`_grf_fit_core`).
+- **`StructureFunction2DStack.fit_GRF(...)`** — joint anisotropic-GRF
+  fit across the per-annulus slices.
+- **`StructureFunction2DStack.measure_heuristics(...)`** — six
+  model-free per-ring scalars (`T1a..T4`) mapping onto the GRF
+  parameters: amplitude, radial/azimuthal correlation lengths,
+  anisotropy, and stationarity slopes.
+- **Spectral diagnostics on `linecube`.** New `SpectralACF` container
+  and `linecube.spectral_acf(...)` — the channel-to-channel
+  autocorrelation diagnostic used to spot oversampled spectral axes
+  before computing noise statistics.
+- **`linecube.noise_structure_function(...)`** — empirical noise
+  `S_2` averaged over signal-free channels, returning a
+  `StructureFunction2D`-compatible surface.
+- **`linecube.gaussian_beam_s2(...)`** — analytic Gaussian-beam noise
+  `S_2` prediction matched to an empirical surface via an explicit
+  `match=` argument (counts / lag-grid / `noise_mask` inherited).
+- **Spectral smoothing in `linecube.to_momentmap`.** New `smooth` and
+  `polyorder` kwargs apply a Savitzky-Golay (or top-hat) smoother
+  before collapse and re-estimate the RMS from the smoothed cube,
+  matching the `bettermoments` CLI flow.
+- **`product=` kwarg in `linecube.to_momentmap`** — pick a specific
+  bettermoments product suffix (e.g. `'v0'` for `quadratic`) instead
+  of always taking the first. The matching `'d'`-prefixed
+  uncertainty product is attached to the returned map as `.error`.
+- **`rotationmap.fit_map(optimize_kwargs=...)`** — forwarded to the
+  pre-MCMC `L-BFGS-B` optimizer. Supports `'method'` and `'options'`
+  (a dict of `scipy.optimize.minimize` options).
+- **`py.typed` marker** — `eddy` is now PEP-561 type-stubs-compatible,
+  so IDE / type-checker tooling no longer skips the package.
+- **`structurefunction` optional dependency** — install the numba
+  extra via `pip install astro-eddy[structurefunction]`. `import
+  eddy` works without numba; only the structure-function entry
+  points raise.
+- **Tests.** New `tests/test_structurefunction.py` (14 cases)
+  covering analytic recovery, NaN handling, reference-annulus mode,
+  the result-class `combine` / `fit_spiral` helpers, the radius-sweep
+  stack (including single-element-stack equivalence with a direct
+  call), and end-to-end smoke tests through
+  `momentmap.compute_structure_function` and
+  `compute_structure_function_stack`.
+
+### Changed
+- **`linecube.to_momentmap` is now keyword-only after `method`.**
+  Everything else (`product`, `clip`, `smooth`, `polyorder`,
+  `bettermoments_kwargs`) must be passed by name. An old positional
+  call (e.g. `cube.to_momentmap('quadratic', 3.0)`) now raises
+  `TypeError` immediately instead of binding `product=3.0` and
+  failing during product validation.
+- **`linecube.to_momentmap` no longer requires a `BUNIT` header
+  card** or the private `bettermoments.io._get_bunits` helper. A
+  failed lookup falls back to a name-based velocity/intensity
+  classification via the new `_BM_VELOCITY_PRODUCTS` set, so
+  simulated cubes (which often lack `BUNIT`) and future
+  bettermoments releases that move `_get_bunits` both degrade
+  gracefully.
+- **`rotationmap.fit_map(optimize_kwargs=...)` rejects unknown
+  top-level keys.** Previously, anything other than `'method'` and
+  `'options'` was silently dropped — including the common mistake of
+  passing solver options (`maxiter`, `ftol`, ...) at the top level
+  instead of nesting them under `'options'`. The new behavior raises
+  `TypeError` with a hint about the nested form.
+- **The momentmap polar pipeline leaves `S2_i = None`.** Its `dx` is
+  arcsec and its `dy` is degrees, so an azimuthally-averaged
+  `sqrt(l_x^2 + l_y^2)` mixes incommensurate units and is not a
+  physical average. `StructureFunction2D.S2_i` is now an
+  `Optional[ndarray]`; `plot_profiles`, `compare_to`,
+  `plot_comparison`, `combine`, `subtract`, and `S2_i_stack` all
+  branch on it.
+- **Uniform `rgrid` / `tgrid` are required by the structure-function
+  pipeline.** `momentmap._structure_function_polar_grid` now raises
+  `ValueError` on log-spaced or otherwise non-uniform grids instead
+  of silently mislabeling the lag axis with the mean spacing.
 
 ### Fixed
+- `S2phi(dphi, Nphi, A1, A3=...)` no longer silently drops the m=3
+  term when `A2 is None`; the `m=3` branch was previously nested
+  inside the `m=2` branch.
+- `StructureFunction2DStack.measure_heuristics` no longer raises
+  `ZeroDivisionError` on stacks with all-zero reliability weights
+  (e.g. mixed rings where every `ell_r` or `ell_phi` half-power lag is
+  NaN). Weight positivity is now folded into the radial/azimuthal
+  masks and a clear `ValueError` fires when nothing survives. The
+  bare `except Exception` around the slope fit was replaced with an
+  explicit `m.sum() < 2` guard plus a targeted `LinAlgError` catch.
+- Default-grid `fit_GRF(pitch=True, r_axis=...)` no longer crashes
+  inside scipy's SVD. `_grf_surface_setup` drops non-positive radii
+  (with a `warnings.warn` naming the count) before evaluating
+  `ell_r(r) = ell0r * (r/r0)**alphar`, which was singular at `r = 0`.
+- `_grf_*_setup` no longer crashes with `min() iterable argument is
+  empty` / `zero-size array reduction` when no annulus has positive
+  lags. Degenerate cases now feed `np.nan` placeholders to
+  `_grf_data_bounds`, whose existing filter drops them and falls
+  back to the module-wide defaults.
+- `imagecube.polar_deprojection`'s `tgrid` docstring now says
+  `[radians]` (matching the implementation, which builds
+  `np.linspace(-pi, pi, ...)`); the previous "[degrees]" annotation
+  silently produced ~57× inflated azimuthal lags for users who
+  followed the docstring.
 - `pyproject.toml` version had drifted from `eddy.__version__`; both
   now report `3.1.0`.
+
+### Behaviour notes
+- `StructureFunction2D.fit_GRF` / `StructureFunction2DStack.fit_GRF`
+  now warn (a) when a user-supplied `p0` entry is clipped onto a
+  bound (naming the parameter, the requested value, and the bound),
+  and (b) per parameter whose lsq solution sits on a bound (the
+  reported `perr` is unreliable). The MCMC walker centre is also
+  nudged strictly inside the box before scattering, so walkers no
+  longer start with ~50 % of members at `-inf` prior when a
+  parameter pins. Gaussian priors are intersected with the flat
+  bounds — a prior that pulls walkers past a bound is truncated
+  there.
+
+### Backward compatibility
+- All public 3.0.x `fit_map`, `fit_annuli`, `get_vlos`, `plot_*`, and
+  instantiation call signatures are preserved.
+- The `linecube.to_momentmap` signature change is the only positional
+  break in 3.1.0. Migration is a one-line edit per call site (add
+  `,` after `method` and use keyword names for everything else).
 
 ## [3.0.0] – 2026-05-13
 

@@ -254,7 +254,9 @@ def test_momentmap_compute_structure_function_stack(hd163296_v0_path):
     assert stack.S2_stack.shape == (3,) + stack[0].S2.shape
     assert stack.S2_y_stack.shape == (3, stack[0].S2_y.size)
     assert stack.S2_x_stack.shape == (3, stack[0].S2_x.size)
-    assert stack.S2_i_stack.shape == (3, 20)
+    # Polar pipeline (arcsec radial / deg azimuthal) leaves S2_i undefined.
+    assert stack.S2_i_stack is None
+    assert all(r.S2_i is None for r in stack)
 
     # The deprojected grid is shared (computed once).
     assert stack.gridded is not None
@@ -272,8 +274,8 @@ def test_momentmap_compute_structure_function_stack(hd163296_v0_path):
 
 
 def test_structurefunction2dstack_fit_spiral_smoke():
-    """``StructureFunction2DStack.fit_spiral`` returns popt/perr arrays
-    of shape ``(N_ref, 1 + len(modes))``."""
+    """``StructureFunction2DStack.fit_spiral`` returns (popt, perr, model_fns)
+    where popt/perr have shape ``(N_ref, 1 + len(modes))``."""
     dphi = np.linspace(0.0, 180.0, 41)
     mlx = 3
     mly = dphi.size - 1
@@ -296,9 +298,10 @@ def test_structurefunction2dstack_fit_spiral_smoke():
     results = [_make_result(A) for A in amps_true]
     stack = StructureFunction2DStack(ref_rs=[1.0, 1.5, 2.0],
                                      ref_band=0.05, results=results)
-    popt, perr = stack.fit_spiral(modes=(1,))
+    popt, perr, model_fns = stack.fit_spiral(modes=(1,))
     assert popt.shape == (3, 2)
     assert perr.shape == (3, 2)
+    assert len(model_fns) == 3
     # Amplitudes recovered within a few %.
     np.testing.assert_allclose(np.abs(popt[:, 1]), amps_true, atol=0.02)
 
@@ -318,7 +321,10 @@ def test_momentmap_compute_structure_function_smoke(hd163296_v0_path):
     assert result.S2.ndim == 2
     assert result.lags_x.size == result.S2_x.size
     assert result.lags_y.size == result.S2_y.size
-    assert result.lags_i.size == result.S2_i.size == 25
+    # Polar pipeline drops the mixed-units azimuthal average; bin axis is
+    # still built so the shape contract for ``n_bins`` is observable.
+    assert result.lags_i.size == 25
+    assert result.S2_i is None
     # The deprojected field is real-valued so S_2 should be finite and
     # non-negative everywhere it has any pair support.
     has_pairs = result.counts > 0

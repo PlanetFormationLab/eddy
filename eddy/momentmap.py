@@ -169,17 +169,16 @@ class momentmap(imagecube):
         regular grid is fed to the numba kernel in
         :mod:`eddy.structurefunction`. The result is a
         :class:`~eddy.structurefunction.StructureFunction2D` whose two
-        lag axes are radial separation in [arcsec] and azimuthal
-        separation in [deg].
+        lag axes are radial lag in [arcsec] and azimuthal lag in [deg].
 
         Args:
             x0, y0 (Optional[float]): Source offsets [arcsec].
             inc, PA (Optional[float]): Source inclination / position
                 angle [deg]. See :meth:`imagecube.disk_coords` for the
                 sign convention.
-            z0, psi, r_taper, q_taper, r_cavity, z_func, shadowed:
-                Forwarded to :meth:`imagecube.polar_deprojection` to
-                define the emission surface.
+            z0, psi, r_taper, q_taper, r_cavity, z_func, shadowed
+                (Optional): Forwarded to :meth:`imagecube.polar_deprojection`
+                to define the emission surface.
             rgrid, tgrid (Optional[ndarray]): Radial grid in [arcsec]
                 and azimuthal grid in [rad]. Defaults to the
                 :meth:`imagecube.polar_deprojection` defaults.
@@ -238,15 +237,15 @@ class momentmap(imagecube):
         """Compute the structure function at a sequence of reference radii.
 
         The polar deprojection is performed once and shared across all
-        ``ref_r`` values; only the (much cheaper) kernel call runs N
-        times. This is the natural workflow for radius-resolved spiral
-        / turbulence amplitude analyses.
+        ``ref_r`` values; only the (much cheaper) kernel call runs N times.
+        Use this when computing S_2 at many reference radii so the
+        deprojection cost is paid only once. All other kwargs match
+        :meth:`compute_structure_function`.
 
         Args:
             ref_rs (sequence of float): Reference annulus radii [arcsec].
             ref_band (float): Half-width of each reference annulus
                 [arcsec]. Shared across all radii.
-            All other kwargs match :meth:`compute_structure_function`.
 
         Returns:
             :class:`~eddy.structurefunction.StructureFunction2DStack`
@@ -301,8 +300,15 @@ class momentmap(imagecube):
             rgrid=rgrid, tgrid=tgrid, griddata_kwargs=griddata_kwargs,
         )
         gridded = np.asarray(gridded).T
-        dr = float(np.mean(np.diff(rgrid_out)))
-        dphi_deg = float(np.degrees(np.mean(np.diff(tgrid_out))))
+        for name, axis in (("rgrid", rgrid_out), ("tgrid", tgrid_out)):
+            d = np.diff(axis)
+            if d.size == 0 or not np.allclose(d, d[0]):
+                raise ValueError(
+                    "{} must be uniformly spaced for the structure function "
+                    "(lag axes are scaled by a single dr/dphi). Pass a linear "
+                    "grid such as np.linspace / np.arange.".format(name))
+        dr = float(np.diff(rgrid_out)[0])
+        dphi_deg = float(np.degrees(np.diff(tgrid_out)[0]))
         return rgrid_out, tgrid_out, gridded, dr, dphi_deg
 
     @staticmethod
@@ -313,43 +319,28 @@ class momentmap(imagecube):
         """Run the structure-function kernel on an already-deprojected
         polar grid and build a :class:`StructureFunction2D`.
         """
-        from .structurefunction import (
-            StructureFunction2D, compute_s2, extract_basic_profiles,
-        )
+        from .structurefunction import StructureFunction2D
 
         max_lag_x = (None if max_lag_r is None
                      else max(1, int(round(max_lag_r / dr))))
         max_lag_y = (None if max_lag_phi is None
                      else max(1, int(round(max_lag_phi / dphi_deg))))
-
-        if ref_r is None:
-            ref_i_idx = -1
-        else:
-            ref_i_idx = int(np.argmin(np.abs(rgrid_out - ref_r)))
         ref_band_idx = int(round(ref_band / dr)) if ref_band > 0 else 0
+        ref_i_idx = (-1 if ref_r is None
+                     else int(np.argmin(np.abs(rgrid_out - ref_r))))
 
-        S2, counts, mlx, mly = compute_s2(
-            gridded, max_lag_x=max_lag_x, max_lag_y=max_lag_y,
+        # dx is arcsec and dy is degrees on a polar grid, so the
+        # sqrt(lx^2 + ly^2) isotropic bins mix incommensurate units.
+        # Pass S2_i=None to suppress the meaningless azimuthal average.
+        return StructureFunction2D.from_array(
+            gridded, dx=dr, dy=dphi_deg,
+            max_lag_x=max_lag_x, max_lag_y=max_lag_y,
             ref_i=ref_i_idx, ref_band=ref_band_idx,
-            symmetrize=symmetrize,
-        )
-        lags_x, lags_y, lags_i, S2_x, S2_y, S2_i = extract_basic_profiles(
-            S2, mlx, mly, dx=dr, dy=dphi_deg,
-            n_bins=n_bins, log_spaced=log_spaced,
-        )
-        # Symmetric whenever there is no reference annulus (kernel
-        # already symmetric) or the user asked for the symmetrize
-        # post-process.
-        symmetrized = (ref_i_idx < 0) or bool(symmetrize)
-        return StructureFunction2D(
-            S2=S2, counts=counts, dx=dr, dy=dphi_deg,
-            lags_x=lags_x, lags_y=lags_y, lags_i=lags_i,
-            S2_x=S2_x, S2_y=S2_y, S2_i=S2_i,
+            n_bins=n_bins, log_spaced=log_spaced, symmetrize=symmetrize,
+            S2_i=None,
             x_grid=rgrid_out, y_grid=tgrid_out, gridded=gridded,
             ref=(None if ref_r is None else float(rgrid_out[ref_i_idx])),
-            ref_band=(ref_band_idx * dr if ref_band_idx else 0.0),
             x_label="radial lag [arcsec]",
             y_label="azimuthal lag [deg]",
             azimuthal_axis="y",
-            symmetrized=symmetrized,
         )

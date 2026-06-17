@@ -781,8 +781,11 @@ class imagecube(object):
                 in [arcsec]. This will override the analytical form.
             shadowed (Optional[bool]): Whether to use the slower, but more
                 robust method for deprojecting pixel values.
-            rgrid (Optional[array]): Radial grid in [arcsec].
-            tgrid (Optional[array]): Azimuthal grid in [degrees].
+            rgrid (Optional[array]): Radial grid in [arcsec]. Defaults to
+                ``np.arange(0, self.xaxis.max(), self.dpix)``.
+            tgrid (Optional[array]): Azimuthal grid in [radians] on
+                ``[-pi, pi]``. Defaults to
+                ``np.linspace(-pi, pi, self.xaxis.size)``.
             griddata_kwargs (Optional[dict]): Kwargs to pass to
                 ``scipy.interpolate.griddata``.
 

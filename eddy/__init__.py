@@ -15,7 +15,9 @@ from .momentmap import momentmap
 from .rotationmap import rotationmap
 from .linecube import linecube
 from .annulus import annulus, Annulus, Annulus2D, Annulus3D
-from .structurefunction import StructureFunction2D, StructureFunction2DStack
+from .linecube import SpectralACF
+from .structurefunction import (StructureFunction2D, StructureFunction2DStack,
+                                structure_function_ensemble)
 
 __all__ = [
     "__version__",
@@ -29,4 +31,6 @@ __all__ = [
     "Annulus3D",
     "StructureFunction2D",
     "StructureFunction2DStack",
+    "SpectralACF",
+    "structure_function_ensemble",
 ]

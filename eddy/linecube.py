@@ -57,7 +57,7 @@ class SpectralACF:
                 default) reproduces the 95% null band on the plot.
 
         Returns:
-            ndarray of lag values where the null is rejected.
+            ndarray: Lag values where the null hypothesis is rejected.
         """
         from scipy.stats import norm
         z = norm.ppf(1.0 - 0.5 * float(alpha))
@@ -70,16 +70,18 @@ class SpectralACF:
         """Plot the ACF with the 95% null band shaded.
 
         Args:
-            ax: Existing matplotlib axis. Created if not supplied.
-            x_unit ({'channels', 'velocity'}): Lag axis units.
-                ``'velocity'`` multiplies by ``chan_width``.
+            ax (Optional[matplotlib axes]): Existing axes. Created if not
+                supplied.
+            x_unit (Optional[str]): Lag axis units, either ``'channels'``
+                (default) or ``'velocity'`` (multiplies by ``chan_width``).
             skip_zero (bool): Hide ``k=0`` from the plot (it is
                 always 1 by construction and obscures the y-range).
             return_fig (bool): If ``True``, return the matplotlib
                 figure rather than just the axis.
 
         Returns:
-            ``fig`` if ``return_fig``, else ``ax``.
+            fig (Optional[matplotlib figure]): Figure if ``return_fig=True``,
+                else ``None``.
         """
         if ax is None:
             fig, ax = plt.subplots()
@@ -107,7 +109,18 @@ class SpectralACF:
         ax.set_xlabel(xlabel)
         ax.set_ylabel(r'$\hat{\rho}(\tau)$')
         ax.legend(frameon=False)
-        return fig if return_fig else ax
+        return fig if return_fig else None
+
+
+#: Bettermoments product suffixes whose canonical unit is ``'m/s'``. Used as
+#: a fallback in :meth:`linecube.to_momentmap` when
+#: ``bettermoments.io._get_bunits`` is unusable (header without ``BUNIT``,
+#: or the private API moved in a newer release) so the velocity vs.
+#: intensity dispatch keeps working without that dependency.
+_BM_VELOCITY_PRODUCTS = frozenset({
+    'M1', 'M2', 'v0', 'dV', 'width',
+    'wp50', 'wp80', 'wp95', 'wp99',
+})
 
 
 class linecube(imagecube):
@@ -130,7 +143,7 @@ class linecube(imagecube):
 
     # -- 3D CUBE I/O & DIAGNOSTICS -- #
 
-    def to_momentmap(self, method='zeroth', product=None, clip=None,
+    def to_momentmap(self, method='zeroth', *, product=None, clip=None,
                      smooth=0, polyorder=0, bettermoments_kwargs=None):
         """Collapse the spectral cube to a 2D moment map via
         ``bettermoments``.
@@ -145,8 +158,8 @@ class linecube(imagecube):
                 product to return, as named by ``bettermoments`` (e.g.
                 ``'M0'``, ``'v0'``, ``'wp50'``, ``'gv0'``). If
                 ``None`` (default), the first product of the method is
-                used — matching the historical behaviour. Uncertainty
-                suffixes (``'d…'``) are rejected; the matching
+                used, matching the historical behavior. Uncertainty
+                suffixes (``'d...'``) are rejected; the matching
                 uncertainty array is attached as ``.error`` instead.
             clip (Optional[float]): If set, replace pixels with
                 ``|data| < clip * rms`` by zero before collapsing —
@@ -253,8 +266,16 @@ class linecube(imagecube):
 
         # Use bettermoments' canonical unit string for the chosen
         # product — ``'m/s'`` flags velocity fields (→ rotationmap);
-        # everything else is intensity-typed (→ momentmap).
-        bunit = bm.io._get_bunits(self.path)[product]
+        # everything else is intensity-typed (→ momentmap). The
+        # ``_get_bunits`` helper is private to bettermoments and requires
+        # a ``BUNIT`` card in the input header; both can break (a future
+        # bettermoments release moving the helper, or a simulated cube
+        # without a ``BUNIT``), so fall back to a name-based lookup that
+        # does not depend on either.
+        try:
+            bunit = bm.io._get_bunits(self.path)[product]
+        except (AttributeError, KeyError, OSError):
+            bunit = 'm/s' if product in _BM_VELOCITY_PRODUCTS else 'Jy/beam'
         if bunit == 'm/s':
             from .rotationmap import rotationmap
             out_cls = rotationmap
@@ -332,10 +353,10 @@ class linecube(imagecube):
         rms = np.where(rmask[None, :, :], rms, np.nan)
         return np.sqrt(np.nansum(rms**2) / np.sum(np.isfinite(rms)))
 
-    def gaussian_beam_s2(self, lags_x, lags_y=None, sigma2=None,
+    def gaussian_beam_s2(self, lags_x=None, lags_y=None, sigma2=None,
                          counts=None, N=None, r_in=None, r_out=None,
                          n_bins=50, log_spaced=False,
-                         x_label="lag_x", y_label="lag_y"):
+                         x_label="lag_x", y_label="lag_y", *, match=None):
         """Analytic Gaussian-beam noise ``S_2`` prediction for this cube.
 
         Convenience wrapper around
@@ -344,27 +365,27 @@ class linecube(imagecube):
         ``bpa``) and the per-pixel noise variance from
         :meth:`estimate_cube_RMS`.
 
-        The ergonomic path is to pass the empirical
-        :class:`StructureFunction2D` directly -- the lag grid, pair
-        counts, and (when available) the ``N`` / ``r_in`` / ``r_out``
-        mask used to build the empirical are inherited automatically,
-        so the two ``S_2`` instances share the same ``sigma2`` region:
+        Pass ``match=emp`` to inherit the lag grid, pair counts, and
+        (when available) the ``N`` / ``r_in`` / ``r_out`` mask from an
+        empirical result, so both ``S_2`` instances share the same
+        ``sigma2`` region:
 
             emp = cube.noise_structure_function(r_in=1.5, r_out=4.0)
-            ana = cube.gaussian_beam_s2(emp)  # inherits r_in/r_out/N
+            ana = cube.gaussian_beam_s2(match=emp)  # inherits r_in/r_out/N
             emp.plot_comparison(ana)
 
         Explicit ``N`` / ``r_in`` / ``r_out`` always override the
-        inherited values. Without an empirical and without explicit
+        inherited values. Without ``match=`` and without explicit
         overrides, ``N=10``, ``r_in=0.0``, ``r_out=1e10`` are used.
 
         Args:
-            lags_x: Either a 1D array of positive lags along axis 0,
-                or a :class:`StructureFunction2D` -- in which case
-                ``lags_x``, ``lags_y``, and ``counts`` are taken from
-                that instance.
+            lags_x (Optional[ndarray]): 1D positive lags along axis 0.
+                Required when ``match`` is not given.
             lags_y (Optional[ndarray]): 1D positive lags along axis 1.
-                Ignored if ``lags_x`` is a ``StructureFunction2D``.
+                Required when ``match`` is not given.
+            match (Optional[StructureFunction2D]): Empirical result
+                whose ``lags_x``, ``lags_y``, ``counts``, and
+                ``noise_mask`` (if set) are inherited as defaults.
             sigma2 (Optional[float]): Per-pixel noise variance. If
                 ``None``, defaults to
                 ``estimate_cube_RMS(N=N, r_in=r_in, r_out=r_out)**2``.
@@ -374,7 +395,7 @@ class linecube(imagecube):
                 structure" residual is dominated by that mismatch.
             counts (Optional[ndarray]): Pair counts to attach to the
                 returned result. Defaults to the empirical's counts if
-                ``lags_x`` is a ``StructureFunction2D``, else ones.
+                ``match`` is given, else ones.
             N (int): Edge-channel count for the default RMS estimate.
             r_in, r_out (float): Annulus [arcsec] for the default RMS
                 estimate.
@@ -390,14 +411,27 @@ class linecube(imagecube):
             gaussian_beam_s2 as _gaussian_beam_s2,
         )
 
+        # Support the legacy positional form gaussian_beam_s2(emp) where
+        # emp is a StructureFunction2D passed as lags_x.
         if isinstance(lags_x, StructureFunction2D):
+            import warnings
+            warnings.warn(
+                "Passing a StructureFunction2D as the first positional "
+                "argument to gaussian_beam_s2 is deprecated; use "
+                "gaussian_beam_s2(match=emp) instead.",
+                DeprecationWarning, stacklevel=2,
+            )
             match = lags_x
-            lags_x = match.lags_x
+            lags_x = None
+
+        if match is not None:
+            if lags_x is None:
+                lags_x = match.lags_x
             if lags_y is None:
                 lags_y = match.lags_y
             if counts is None:
                 counts = match.counts
-            nm = getattr(match, "noise_mask", None)
+            nm = match.noise_mask
             if nm is not None:
                 if N is None:
                     N = nm.get("N")
@@ -405,9 +439,9 @@ class linecube(imagecube):
                     r_in = nm.get("r_in")
                 if r_out is None:
                     r_out = nm.get("r_out")
-        elif lags_y is None:
+        elif lags_x is None or lags_y is None:
             raise ValueError(
-                "lags_y is required unless lags_x is a StructureFunction2D."
+                "lags_x and lags_y are required when match is not given."
             )
 
         if N is None:
@@ -439,8 +473,8 @@ class linecube(imagecube):
 
         Each requested channel is masked to a circular annulus
         ``r_in <= r <= r_out`` (matching :meth:`estimate_cube_RMS`'s
-        convention -- use ``r_in > 0`` to exclude residual emission in
-        the centre, ``r_out`` to exclude noisy edges), passed to
+        convention: use ``r_in > 0`` to exclude residual emission in
+        the center, ``r_out`` to exclude noisy edges), passed to
         :meth:`eddy.structurefunction.StructureFunction2D.from_array`,
         and the per-channel results are combined via pair-count-weighted
         averaging.
@@ -476,7 +510,7 @@ class linecube(imagecube):
                 list of per-channel :class:`StructureFunction2D`
                 results.
             symmetrize (bool): Forwarded to
-                :class:`StructureFunction2D.from_array`. Noise has
+                :meth:`StructureFunction2D.from_array`. Noise has
                 no preferred radial direction, so the default ``True``
                 is almost always what you want.
 
@@ -491,8 +525,7 @@ class linecube(imagecube):
             ``S_2``. Reload with ``fill=np.nan`` or set ``r_out`` to
             exclude that region.
         """
-        from .structurefunction import StructureFunction2D, _require_numba
-        _require_numba()
+        from .structurefunction import StructureFunction2D
 
         user_channels = channels
         if channels is None:
@@ -575,7 +608,7 @@ class linecube(imagecube):
                 velocity range containing signal. Channels with
                 ``v_min <= velax <= v_max`` are NaN-masked.
             r_in (float): Inner mask radius [arcsec]. Pixels with
-                ``r < r_in`` are excluded -- use this to drop the
+                ``r < r_in`` are excluded; use this to drop the
                 central emission region in a line cube.
             r_out (float): Outer mask radius [arcsec].
             max_lag (Optional[int]): Maximum spectral lag in channels.
@@ -625,19 +658,25 @@ class linecube(imagecube):
         with np.errstate(invalid="ignore"):
             data -= np.nanmean(data, axis=0, keepdims=True)
 
+        # Precompute finite mask and zero-filled copy once to avoid
+        # recomputing np.isfinite on sub-arrays at every lag.
+        fin = np.isfinite(data)
+        data_zf = np.where(fin, data, 0.0)
+
         lags = np.arange(max_lag + 1)
         acf = np.empty(max_lag + 1, dtype=float)
         counts = np.empty(max_lag + 1, dtype=np.int64)
         for k in lags:
             if k == 0:
-                x = data
-                y = data
+                xz = data_zf
+                yz = data_zf
+                valid = fin
             else:
-                x = data[:-k]
-                y = data[k:]
-            valid = np.isfinite(x) & np.isfinite(y)
-            xk = np.where(valid, x, 0.0)
-            yk = np.where(valid, y, 0.0)
+                xz = data_zf[:-k]
+                yz = data_zf[k:]
+                valid = fin[:-k] & fin[k:]
+            xk = xz * valid
+            yk = yz * valid
             num = float(np.sum(xk * yk))
             denom = np.sqrt(float(np.sum(xk * xk))
                             * float(np.sum(yk * yk)))

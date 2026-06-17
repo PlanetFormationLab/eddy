@@ -42,6 +42,15 @@ Contents
    tutorials/tutorial_4
    tutorials/tutorial_5
    tutorials/tutorial_6_numpyro
+   tutorials/tutorial_7_structurefunction
+
+.. toctree::
+   :maxdepth: 2
+   :caption: User Guide
+
+   user/rotationmap
+   user/annulus
+   user/structurefunction
 
 
 Support
