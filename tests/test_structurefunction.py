@@ -13,7 +13,8 @@ import pytest
 
 numba = pytest.importorskip("numba")  # noqa: F841 - module-level skip
 
-from eddy import StructureFunction2D, StructureFunction2DStack, momentmap
+from eddy import (StructureFunction2D, StructureFunction2DStack, SpectralACF,
+                  momentmap)
 import eddy.structurefunction as sf
 from eddy.structurefunction import (
     compute_s2,
@@ -235,6 +236,100 @@ def test_structurefunction2d_fit_spiral_m1_recovers_amplitude():
     assert np.allclose(model_fn(dphi), S2_y, atol=1e-6)
 
 
+def _smoothed_polar_field(seed=7, n_r=80, n_phi=120, sigma_r=3.0, sigma_phi=4.0):
+    """Gaussian-smoothed white noise on a polar grid: a stationary field
+    with a finite, anisotropic correlation scale so the per-ring S_2 rises
+    to a well-defined plateau (half-power lags are finite)."""
+    from scipy.ndimage import gaussian_filter
+    rng = np.random.default_rng(seed)
+    return gaussian_filter(rng.standard_normal((n_r, n_phi)),
+                           sigma=(sigma_r, sigma_phi), mode="wrap")
+
+
+def test_measure_heuristics_returns_finite_scalars():
+    """``measure_heuristics`` on a well-formed stack returns six finite
+    scalars: the amplitude tracks the field's fluctuation level, the
+    correlation lengths are positive, and the raw/rescaled amplitudes are
+    mutually consistent."""
+    field = _smoothed_polar_field()
+    dx, dy = 0.05, 3.0
+    x_axis = 0.5 + np.arange(field.shape[0]) * dx
+    stack = StructureFunction2DStack.from_array(
+        field, ref_rs=[1.0, 1.5, 2.0, 2.5], x_axis=x_axis, dx=dx, dy=dy,
+        ref_band=0.05, max_lag_x=20, max_lag_y=30, n_bins=25,
+    )
+
+    sig_hat, T1b, T1c, A_hat, T3, T4 = stack.measure_heuristics()
+    assert all(np.isfinite(v) for v in (sig_hat, T1b, T1c, A_hat, T3, T4))
+    # sigma_hat = sqrt(plateau / 2) -> field std for a stationary field.
+    assert 0.5 * field.std() < sig_hat < 2.0 * field.std()
+    assert T1b > 0 and T1c > 0 and A_hat > 0
+    # Azimuthal smoothing was wider than radial, so the arc-length scale
+    # exceeds the radial scale: anisotropy A_hat > 1.
+    assert A_hat > 1.0
+    # Rescaled sigma_hat and raw plateau T1a are the same quantity.
+    T1a_raw = stack.measure_heuristics(rescale_returns=False)[0]
+    assert T1a_raw == pytest.approx(2.0 * sig_hat ** 2)
+
+
+def test_measure_heuristics_all_zero_weights_raises():
+    """A stack with no measurable correlation scale (constant field -> zero
+    S_2 -> NaN half-power lags -> zero reliability weights) must raise a
+    clear ValueError, not the ZeroDivisionError from np.average (P0.3)."""
+    flat = np.full((80, 120), 3.14159)
+    dx, dy = 0.05, 3.0
+    x_axis = 0.5 + np.arange(flat.shape[0]) * dx
+    stack = StructureFunction2DStack.from_array(
+        flat, ref_rs=[1.0, 1.5, 2.0], x_axis=x_axis, dx=dx, dy=dy,
+        ref_band=0.05, max_lag_x=20, max_lag_y=30, n_bins=25,
+    )
+    with pytest.raises(ValueError, match="positive reliability weights"):
+        stack.measure_heuristics()
+
+
+def test_spectral_acf_basic(twhya_linecube):
+    """``spectral_acf`` returns a SpectralACF with a normalised lag-0
+    autocorrelation, a non-negative null band, and flags only positive
+    lags as significant."""
+    acf = twhya_linecube.spectral_acf(r_in=1.0, r_out=2.0, max_lag=15)
+    assert isinstance(acf, SpectralACF)
+    assert acf.lags[0] == 0
+    assert acf.acf[0] == pytest.approx(1.0)          # lag-0 = self-correlation
+    assert np.all(np.isfinite(acf.acf))
+    assert np.all(acf.null_band >= 0.0)
+    assert acf.n_channels == twhya_linecube.data.shape[0]
+    sig = acf.significant_lags()
+    assert np.all(sig > 0)                           # never flags lag 0
+    assert set(sig).issubset(set(acf.lags))
+
+
+def test_noise_structure_function_basic(twhya_linecube):
+    """``noise_structure_function`` returns a StructureFunction2D of the
+    edge channels, finite where it has pair support, and records the
+    annulus mask it used."""
+    noise = twhya_linecube.noise_structure_function(
+        N=5, r_in=1.0, r_out=2.0, max_lag_x=6, max_lag_y=6, n_bins=15)
+    assert isinstance(noise, StructureFunction2D)
+    assert noise.S2.shape == (13, 13)
+    assert np.all(np.isfinite(noise.S2[noise.counts > 0]))
+    assert noise.noise_mask == {"N": 5, "r_in": 1.0, "r_out": 2.0}
+
+
+def test_gaussian_beam_s2_matches_empirical_grid(twhya_linecube):
+    """``gaussian_beam_s2(match=emp)`` inherits the empirical lag grid and
+    returns a finite, non-negative analytic prediction that is zero at
+    zero lag (no beam-noise structure at zero separation)."""
+    emp = twhya_linecube.noise_structure_function(
+        N=5, r_in=1.0, r_out=2.0, max_lag_x=6, max_lag_y=6, n_bins=15)
+    ana = twhya_linecube.gaussian_beam_s2(match=emp)
+    assert isinstance(ana, StructureFunction2D)
+    assert ana.S2.shape == emp.S2.shape
+    assert np.all(np.isfinite(ana.S2))
+    assert np.all(ana.S2 >= -1e-9)
+    cx, cy = ana.S2.shape[0] // 2, ana.S2.shape[1] // 2
+    assert ana.S2[cx, cy] == pytest.approx(0.0, abs=1e-9)
+
+
 @pytest.mark.slow
 def test_momentmap_compute_structure_function_stack(hd163296_v0_path):
     """Stack over three reference radii on the HD163296 fixture; check
@@ -356,6 +451,92 @@ def test_grf_s2_2d_global_physical_limits():
     row = S2[0]
     assert row[-1] > row[1]
     assert row[-1] > 1.5 * sigma ** 2
+
+
+def _make_global_grf_surface(true, *, dx=0.05, dy=3.0, mlx=25, mly=30,
+                             n_r=80, r_start=0.5):
+    """Build a global-mode ``StructureFunction2D`` whose ``S2`` is exactly
+    ``grf_s2_2d_global`` evaluated at ``true``. Feeding the model back to
+    ``fit_GRF`` makes recovery a clean inverse problem (lsq cost -> 0).
+
+    Correlation lengths in ``true`` must sit well inside the resolved lag
+    window: ``fit_GRF``'s data-driven bounds cap ``ell0r``/``ell0phi`` at
+    half the resolved lag range, so an oversized ``ell`` pins at the bound.
+    """
+    r_axis = r_start + np.arange(n_r) * dx
+    lags_x_full = np.arange(-mlx, mlx + 1) * dx
+    lags_y_deg = np.arange(-mly, mly + 1) * dy
+    S2 = np.asarray(grf_s2_2d_global(r_axis, lags_x_full, lags_y_deg, **true))
+    counts = np.ones_like(S2, dtype=int)
+    result = StructureFunction2D(
+        S2=S2, counts=counts, dx=dx, dy=dy,
+        lags_x=np.arange(mlx + 1) * dx, lags_y=np.arange(mly + 1) * dy,
+        lags_i=np.arange(10) * dx,
+        S2_x=S2[mlx:, mly], S2_y=S2[mlx, mly:], S2_i=None,
+        ref=None, azimuthal_axis="y",
+    )
+    return result, r_axis
+
+
+def test_fit_GRF_global_pitch_false_recovers_params():
+    """Global-mode surface fit (pitch held at 0) recovers the injected
+    amplitude and correlation lengths from a noiseless model surface."""
+    true = dict(sigma=1.3, alphar=0.0, ell0r=0.15, alphaphi=0.0,
+                ell0phi=0.2, r0=2.0, pitch=0.0)
+    result, r_axis = _make_global_grf_surface(true)
+    params, perr, sol, cov = result.fit_GRF(
+        method="lsq", r_axis=r_axis, r0=2.0, pitch=False, progress=False)
+
+    assert sol.cost < 1e-6                       # model surface reproduced
+    assert params["sigma"] == pytest.approx(true["sigma"], rel=0.05)
+    assert params["ell0r"] == pytest.approx(true["ell0r"], rel=0.05)
+    assert params["ell0phi"] == pytest.approx(true["ell0phi"], rel=0.05)
+    assert abs(params["alphar"]) < 0.05          # tied slope, injected 0
+    assert "pitch" not in params                 # not freed
+
+
+def test_fit_GRF_global_pitch_true_recovers_pitch():
+    """With ``pitch=True`` on an anisotropic, pitched surface the fit
+    recovers the pitch angle (and its sign) plus the other parameters."""
+    true = dict(sigma=1.0, alphar=0.0, ell0r=0.2, alphaphi=0.0,
+                ell0phi=0.08, r0=2.0, pitch=25.0)
+    result, r_axis = _make_global_grf_surface(true)
+    params, perr, sol, cov = result.fit_GRF(
+        method="lsq", r_axis=r_axis, r0=2.0, pitch=True, progress=False)
+
+    assert sol.cost < 1e-6
+    assert params["sigma"] == pytest.approx(true["sigma"], rel=0.05)
+    assert params["ell0r"] == pytest.approx(true["ell0r"], rel=0.05)
+    assert params["ell0phi"] == pytest.approx(true["ell0phi"], rel=0.05)
+    assert params["pitch"] == pytest.approx(true["pitch"], abs=1.0)
+
+
+def test_fit_GRF_pitch_true_rejects_symmetric_surface():
+    """A pitch=0 (azimuthally symmetric) surface cannot constrain the
+    pitch ridge; fit_GRF(pitch=True) must refuse it rather than return a
+    spurious pitch."""
+    true = dict(sigma=1.0, alphar=0.0, ell0r=0.15, alphaphi=0.0,
+                ell0phi=0.2, r0=2.0, pitch=0.0)
+    result, r_axis = _make_global_grf_surface(true)
+    with pytest.raises(ValueError, match="symmetric in the azimuthal lag"):
+        result.fit_GRF(method="lsq", r_axis=r_axis, r0=2.0, pitch=True,
+                       progress=False)
+
+
+def test_fit_GRF_drops_nonpositive_radii(recwarn):
+    """A radial grid that includes r=0 (the default polar-grid case that
+    once crashed in the SVD, P0.1) is fitted after dropping the singular
+    row, with a warning, instead of raising."""
+    true = dict(sigma=1.0, alphar=0.0, ell0r=0.2, alphaphi=0.0,
+                ell0phi=0.08, r0=2.0, pitch=25.0)
+    result, _ = _make_global_grf_surface(true)
+    r_axis_zero = np.arange(80) * 0.05           # starts at 0.0
+
+    params, perr, sol, cov = result.fit_GRF(
+        method="lsq", r_axis=r_axis_zero, r0=2.0, pitch=True, progress=False)
+
+    assert any("non-positive" in str(w.message) for w in recwarn)
+    assert all(np.isfinite(v) for v in params.values())
 
 
 @pytest.mark.slow

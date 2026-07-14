@@ -78,11 +78,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extra via `pip install astro-eddy[structurefunction]`. `import
   eddy` works without numba; only the structure-function entry
   points raise.
-- **Tests.** New `tests/test_structurefunction.py` (14 cases)
+- **Tests.** New `tests/test_structurefunction.py` (27 cases)
   covering analytic recovery, NaN handling, reference-annulus mode,
   the result-class `combine` / `fit_spiral` helpers, the radius-sweep
   stack (including single-element-stack equivalence with a direct
-  call), and end-to-end smoke tests through
+  call), the GRF forward model (numba/Python kernel equivalence and
+  physical limits), the `fit_GRF` surface fit (parameter recovery,
+  pitch recovery, and the non-positive-radius guard), the
+  `measure_heuristics` scalars, the `spectral_acf` /
+  `noise_structure_function` / `gaussian_beam_s2` linecube
+  diagnostics, and end-to-end smoke tests through
   `momentmap.compute_structure_function` and
   `compute_structure_function_stack`.
 
