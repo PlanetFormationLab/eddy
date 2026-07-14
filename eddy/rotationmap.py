@@ -1583,10 +1583,11 @@ class rotationmap(momentmap):
         dvprs = ((rvals - r_p) / r_p) * dvprs + 1.0
         vkep = jnp.where(rvals <= r_p, vkep, vkep[idx] * dvprs)
         vkep = jnp.clip(vkep, 0.0, None)
-        if params['w_pressure'] > 0.0:
-            taper = (rvals - r_p) / params['w_pressure']
-            taper = jnp.exp(-jnp.power(taper, 2.0))
-            vkep *= jnp.where(rvals <= r_p, 1.0, taper)
+        has_taper = params['w_pressure'] > 0.0
+        w_pressure = jnp.where(has_taper, params['w_pressure'], 1.0)
+        taper = jnp.exp(-jnp.power((rvals - r_p) / w_pressure, 2.0))
+        taper = jnp.where(rvals <= r_p, 1.0, taper)
+        vkep *= jnp.where(has_taper, taper, 1.0)
         return vkep
 
     def _vpow(self, rvals, tvals, zvals, params):
@@ -1601,10 +1602,11 @@ class rotationmap(momentmap):
         idx = jnp.unravel_index(jnp.argmin(jnp.abs(rvals - r_p)), rvals.shape)
         dvprs = ((rvals - r_p) / r_p) * params['vp_q'] + 1.0
         vpow = jnp.where(rvals <= r_p, vpow, vpow[idx] * dvprs)
-        if params['w_pressure'] > 0.0:
-            taper = (rvals - r_p) / params['w_pressure']
-            taper = jnp.exp(-jnp.power(taper, 2.0))
-            vpow *= jnp.where(rvals <= r_p, 1.0, taper)
+        has_taper = params['w_pressure'] > 0.0
+        w_pressure = jnp.where(has_taper, params['w_pressure'], 1.0)
+        taper = jnp.exp(-jnp.power((rvals - r_p) / w_pressure, 2.0))
+        taper = jnp.where(rvals <= r_p, 1.0, taper)
+        vpow *= jnp.where(has_taper, taper, 1.0)
         return vpow
 
 
