@@ -14,10 +14,12 @@ import pytest
 numba = pytest.importorskip("numba")  # noqa: F841 - module-level skip
 
 from eddy import StructureFunction2D, StructureFunction2DStack, momentmap
+import eddy.structurefunction as sf
 from eddy.structurefunction import (
     compute_s2,
     extract_basic_profiles,
     combine_s2_weighted,
+    grf_s2_2d_global,
     S2phi,
 )
 
@@ -304,6 +306,56 @@ def test_structurefunction2dstack_fit_spiral_smoke():
     assert len(model_fns) == 3
     # Amplitudes recovered within a few %.
     np.testing.assert_allclose(np.abs(popt[:, 1]), amps_true, atol=0.02)
+
+
+@pytest.mark.parametrize("kw", [
+    dict(sigma=1.3, alphar=0.7, ell0r=0.4, alphaphi=1.1, ell0phi=0.3,
+         r0=1.0, pitch=15.0),
+    dict(sigma=0.8, alphar=-0.5, ell0r=0.6, alphaphi=None, ell0phi=None,
+         r0=1.5, pitch=-30.0),
+    dict(sigma=1.0, alphar=0.5, ell0r=0.5, alphaphi=0.5, ell0phi=0.5,
+         r0=1.0, pitch=45.0),
+])
+def test_grf_s2_2d_global_numba_matches_python(monkeypatch, kw):
+    """The numba kernel path of ``grf_s2_2d_global`` must reproduce the
+    pure-Python reference to machine precision, including the NaN pattern
+    for empty base rows and non-positive radii."""
+    r_axis = np.linspace(0.2, 4.0, 45)
+    lags_x = np.linspace(0.0, 2.0, 18)
+    lags_y_deg = np.linspace(-90.0, 90.0, 19)
+
+    numba_out = np.asarray(grf_s2_2d_global(r_axis, lags_x, lags_y_deg, **kw))
+    monkeypatch.setattr(sf, "_HAS_NUMBA", False)
+    python_out = np.asarray(grf_s2_2d_global(r_axis, lags_x, lags_y_deg, **kw))
+
+    # NaN masks (empty base rows) must line up exactly.
+    np.testing.assert_array_equal(np.isnan(numba_out), np.isnan(python_out))
+    fin = np.isfinite(numba_out)
+    np.testing.assert_allclose(numba_out[fin], python_out[fin],
+                               rtol=0, atol=1e-12)
+
+
+def test_grf_s2_2d_global_physical_limits():
+    """``S_2`` of the GRF surface is 0 at zero lag, non-negative, and
+    saturates towards ``2 sigma**2`` as the azimuthal lag grows."""
+    r_axis = np.linspace(0.5, 3.0, 60)
+    lags_x = np.array([0.0, 0.5, 1.0])
+    lags_y_deg = np.linspace(0.0, 179.0, 40)
+    sigma = 1.2
+    S2 = np.asarray(grf_s2_2d_global(
+        r_axis, lags_x, lags_y_deg, sigma=sigma, alphar=0.5, ell0r=0.3,
+        alphaphi=0.5, ell0phi=0.2, r0=1.0, pitch=0.0))
+
+    # Zero radial and azimuthal lag => perfectly correlated => S_2 = 0.
+    assert abs(S2[0, 0]) < 1e-9
+    # Non-negative and bounded by 2 sigma**2 (+ small roundoff).
+    assert np.all(S2 >= -1e-9)
+    assert np.all(S2 <= 2.0 * sigma ** 2 + 1e-6)
+    # Along the zero-radial-lag row, S_2 grows monotonically with |dphi|
+    # and approaches the 2 sigma**2 decorrelation plateau.
+    row = S2[0]
+    assert row[-1] > row[1]
+    assert row[-1] > 1.5 * sigma ** 2
 
 
 @pytest.mark.slow

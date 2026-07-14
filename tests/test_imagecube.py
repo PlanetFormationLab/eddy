@@ -241,13 +241,14 @@ def test_to_momentmap_uncertainty_product_rejected(twhya_cube_path):
 
 
 def test_to_momentmap_smooth_changes_output(twhya_cube_path):
-    """Spectral smoothing should actually alter the moment map. Compares
-    M0 with and without smoothing; the smoothed map should differ from
-    the unsmoothed one and stay finite everywhere."""
+    """Spectral smoothing should actually alter the moment map. Uses the
+    quadratic line-centre velocity, which shifts under smoothing; the
+    zeroth moment is a spectral-axis integral and is invariant under the
+    area-preserving Savitzky-Golay kernel, so it cannot detect smoothing."""
     pytest.importorskip("bettermoments")
     cube = linecube(twhya_cube_path, FOV=4.0)
-    out_raw = cube.to_momentmap(method='zeroth')
-    out_smooth = cube.to_momentmap(method='zeroth', smooth=5, polyorder=3)
+    out_raw = cube.to_momentmap(method='quadratic')
+    out_smooth = cube.to_momentmap(method='quadratic', smooth=5, polyorder=3)
     raw = np.asarray(out_raw.data)
     smoothed = np.asarray(out_smooth.data)
     assert smoothed.shape == raw.shape

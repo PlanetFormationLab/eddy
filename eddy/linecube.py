@@ -114,12 +114,18 @@ class SpectralACF:
 
 #: Bettermoments product suffixes whose canonical unit is ``'m/s'``. Used as
 #: a fallback in :meth:`linecube.to_momentmap` when
-#: ``bettermoments.io._get_bunits`` is unusable (header without ``BUNIT``,
+#: ``bettermoments.io._get_bunits`` is unusable (its path cannot be read,
 #: or the private API moved in a newer release) so the velocity vs.
-#: intensity dispatch keeps working without that dependency.
+#: intensity dispatch keeps working without that dependency. Mirrors the
+#: products bettermoments reports with units of ``'m/s'`` (line centroids
+#: ``*v0`` and widths ``*dV``, plus the moment and percentile velocities);
+#: intensity products (``M0``, ``Fnu``, ``M8``, ``*tau``, ``*h3/h4``,
+#: models) are classified as intensity by omission.
 _BM_VELOCITY_PRODUCTS = frozenset({
-    'M1', 'M2', 'v0', 'dV', 'width',
-    'wp50', 'wp80', 'wp95', 'wp99',
+    'M1', 'M2', 'M9', 'v0', 'dV',
+    'wp50', 'wpdVb', 'wpdVr', 'wp1684',
+    'gv0', 'gdV', 'gtv0', 'gtdV', 'ghv0', 'ghdV',
+    'ggv0', 'ggdV', 'ggv0b', 'ggdVb',
 })
 
 
@@ -240,6 +246,17 @@ class linecube(imagecube):
         # level, so the clip threshold and the bettermoments rms argument
         # should both come from the smoothed data).
         if smooth and int(smooth) > 1:
+            # bettermoments bumps an even ``smooth`` up to the next odd width
+            # before handing it to the Savitzky-Golay filter, which requires
+            # ``polyorder < window_length``. Validate up front so the caller
+            # gets an actionable message rather than scipy's bare error.
+            if int(polyorder) > 0:
+                window = int(smooth) + (0 if int(smooth) % 2 else 1)
+                if int(polyorder) >= window:
+                    raise ValueError(
+                        "polyorder ({}) must be smaller than the smoothing "
+                        "window ({} channels; even `smooth` is rounded up to "
+                        "the next odd width).".format(int(polyorder), window))
             data = bm.smooth_data(data=data, smooth=int(smooth),
                                   polyorder=int(polyorder))
             rms = float(bm.estimate_RMS(data, N=10))
