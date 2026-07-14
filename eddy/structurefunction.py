@@ -941,8 +941,14 @@ def _grf_fit_core(parts, est, data_bounds, *, pitch, fit_alphaphi, method,
     if "none" in plots:
         plots = []
     if "walkers" in plots:
-        walkers = np.transpose(sampler.get_chain(), (2, 0, 1))
-        plot_walkers(walkers, int(nburnin), log_labels)
+        full_chain = sampler.get_chain()          # (nsteps, nwalkers, ndim)
+        walkers = np.stack(
+            [np.exp(full_chain[:, :, n]) if k in _GRF_LOG_SAMPLED
+             else full_chain[:, :, n]
+             for n, k in enumerate(keys)],
+            axis=0,
+        )                                          # (ndim, nsteps, nwalkers)
+        plot_walkers(walkers, int(nburnin), lin_labels)
     if "corner" in plots:
         plot_corner(samples, lin_labels)
     if "bestfit" in plots and plot_bestfit is not None:
@@ -1308,6 +1314,88 @@ def grf_s2_slices(ref_r, lags_r, lags_phi_deg, *, sigma=1.0, alphar=1.0,
                              sigma=sigma, r0=r0, pitch=0.0, spiral=None)
 
 
+if _HAS_NUMBA:
+
+    @njit(parallel=True, cache=True)
+    def _grf_s2_2d_global_kernel(r_axis, di, lp, alphar, ell0r, alphaphi,
+                                 ell0phi, sigma, r0, pitch):
+        """Numba kernel for :func:`grf_s2_2d_global`.
+
+        All inputs are plain arrays / scalars (no kwargs, no None defaults).
+        ``di`` is the integer lag-index array (``round(lags_x / dr)``);
+        ``lp`` is the azimuthal lag array in radians.  The GRF physics is
+        fully inlined so LLVM can fuse the inner arithmetic.
+        """
+        n = r_axis.shape[0]
+        n_lags = di.shape[0]
+        n_phi = lp.shape[0]
+        sigma2 = sigma * sigma
+        out = np.full((n_lags, n_phi), np.nan)
+
+        cp = np.cos(pitch)
+        sp = np.sin(pitch)
+
+        for k in prange(n_lags):                        # parallel over lag bins
+            d = di[k]
+            i_lo = max(0, -d)
+            i_hi = min(n, n - d)
+            n_valid = i_hi - i_lo
+            if n_valid <= 0:
+                continue
+
+            acc = np.zeros(n_phi)
+
+            for ii in range(i_lo, i_hi):                # base-row accumulation
+                ra = r_axis[ii]
+                rb = r_axis[ii + d]
+
+                # Inline ell_r / ell_phi
+                lr_a = ell0r * (ra / r0) ** alphar
+                lr_b = ell0r * (rb / r0) ** alphar
+                lpa  = ell0phi * (ra / r0) ** alphaphi
+                lpb  = ell0phi * (rb / r0) ** alphaphi
+
+                # Inline _sigma_components for point a and b
+                lperp2_a = lr_a * lr_a
+                lpar2_a  = lpa * lpa
+                s11a = 2.0 * (lperp2_a * cp * cp + lpar2_a * sp * sp)
+                s22a = 2.0 * (lperp2_a * sp * sp + lpar2_a * cp * cp)
+                s12a = 2.0 * sp * cp * (lpar2_a - lperp2_a)
+
+                lperp2_b = lr_b * lr_b
+                lpar2_b  = lpb * lpb
+                s11b = 2.0 * (lperp2_b * cp * cp + lpar2_b * sp * sp)
+                s22b = 2.0 * (lperp2_b * sp * sp + lpar2_b * cp * cp)
+                s12b = 2.0 * sp * cp * (lpar2_b - lperp2_b)
+
+                # Averaged anisotropy matrix Sigma_bar and its determinant
+                a_m = 0.5 * (s11a + s11b)
+                d_m = 0.5 * (s22a + s22b)
+                b_m = 0.5 * (s12a + s12b)
+                det = a_m * d_m - b_m * b_m
+
+                # Phi-independent displacement and det prefactor
+                D1    = ra - rb
+                r_bar = 0.5 * (ra + rb)
+                det_a = s11a * s22a - s12a * s12a
+                det_b = s11b * s22b - s12b * s12b
+                pref  = (det_a ** 0.25) * (det_b ** 0.25) / np.sqrt(det)
+
+                for j in range(n_phi):                  # azimuthal lag loop
+                    dphi = -lp[j]                       # phi_a=0 - phi_b=lp[j]
+                    dphi = (dphi + np.pi) % (2.0 * np.pi) - np.pi
+                    D2 = r_bar * dphi
+                    Q  = (d_m * D1 * D1 - 2.0 * b_m * D1 * D2
+                          + a_m * D2 * D2) / det
+                    acc[j] += pref * np.exp(-Q)
+
+            inv_n = 1.0 / n_valid
+            for j in range(n_phi):
+                out[k, j] = 2.0 * sigma2 * (1.0 - acc[j] * inv_n)
+
+        return out
+
+
 def grf_s2_2d_global(r_axis, lags_x, lags_y_deg, *, sigma=1.0, alphar=1.0,
                      ell0r=1.0, alphaphi=None, ell0phi=None, r0=1.0, pitch=0.0):
     """Expected GLOBAL-mode (``ref_i=-1``) 2D ``S_2`` surface of the pitched GRF.
@@ -1363,6 +1451,13 @@ def grf_s2_2d_global(r_axis, lags_x, lags_y_deg, *, sigma=1.0, alphar=1.0,
     di = np.round(np.asarray(lags_x, dtype=float) / dr).astype(int)
     lp = np.radians(np.asarray(lags_y_deg, dtype=float))
     pr = np.radians(pitch)
+
+    if _HAS_NUMBA:
+        return _grf_s2_2d_global_kernel(
+            r_axis, di, lp,
+            float(alphar), float(ell0r), float(alphaphi), float(ell0phi),
+            float(sigma), float(r0), float(pr),
+        )
 
     out = np.full((di.size, lp.size), np.nan)
     for k, d in enumerate(di):
