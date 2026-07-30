@@ -8,3 +8,5 @@
 dist/
 .claude/
 wget-log*
+docs/_build/
+CODE_REVIEW.md

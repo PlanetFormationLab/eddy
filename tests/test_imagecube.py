@@ -176,3 +176,91 @@ def test_to_momentmap_unknown_method_raises(twhya_cube_path):
     cube = linecube(twhya_cube_path, FOV=4.0)
     with pytest.raises(ValueError, match="Unknown bettermoments method"):
         cube.to_momentmap(method='not_a_real_method')
+
+
+# ---------------------------------------------------------------------------
+# linecube.to_momentmap product= selection. The product suffix picks out
+# a specific output of the collapse method, and the returned class is
+# decided by the suffix's bettermoments unit (m/s -> rotationmap).
+# ---------------------------------------------------------------------------
+
+
+def test_to_momentmap_product_v0_from_quadratic(twhya_cube_path):
+    """product='v0' from quadratic returns a rotationmap with dv0 attached."""
+    pytest.importorskip("bettermoments")
+    from eddy import rotationmap
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out = cube.to_momentmap(method='quadratic', product='v0')
+    assert isinstance(out, rotationmap)
+    assert out.header['BUNIT'].lower() == 'm/s'
+    assert hasattr(out, 'error') and out.error is not None
+    assert out.error.shape == out.data.shape
+
+
+def test_to_momentmap_product_fnu_from_quadratic(twhya_cube_path):
+    """product='Fnu' from quadratic returns a momentmap (intensity unit)
+    with dFnu attached as the uncertainty."""
+    pytest.importorskip("bettermoments")
+    from eddy import rotationmap
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out = cube.to_momentmap(method='quadratic', product='Fnu')
+    assert isinstance(out, momentmap)
+    assert not isinstance(out, rotationmap)
+    assert out.header['BUNIT'].lower() != 'm/s'
+    assert hasattr(out, 'error') and out.error is not None
+    assert out.error.shape == out.data.shape
+
+
+def test_to_momentmap_product_wp50_from_percentiles(twhya_cube_path):
+    """percentiles returns 8 products; product='wp50' picks the median
+    velocity (rotationmap) and 'dwp50' is attached as .error."""
+    pytest.importorskip("bettermoments")
+    from eddy import rotationmap
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out = cube.to_momentmap(method='percentiles', product='wp50')
+    assert isinstance(out, rotationmap)
+    assert out.header['BUNIT'].lower() == 'm/s'
+    assert hasattr(out, 'error') and out.error is not None
+    assert out.error.shape == out.data.shape
+
+
+def test_to_momentmap_unknown_product_raises(twhya_cube_path):
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    with pytest.raises(ValueError, match="Unknown product"):
+        cube.to_momentmap(method='quadratic', product='not_a_real_product')
+
+
+def test_to_momentmap_uncertainty_product_rejected(twhya_cube_path):
+    """Asking for a 'd…' uncertainty suffix as the primary product is
+    rejected with a hint to use the value suffix instead."""
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    with pytest.raises(ValueError, match="uncertainty product"):
+        cube.to_momentmap(method='quadratic', product='dv0')
+
+
+def test_to_momentmap_smooth_changes_output(twhya_cube_path):
+    """Spectral smoothing should actually alter the moment map. Uses the
+    quadratic line-centre velocity, which shifts under smoothing; the
+    zeroth moment is a spectral-axis integral and is invariant under the
+    area-preserving Savitzky-Golay kernel, so it cannot detect smoothing."""
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    out_raw = cube.to_momentmap(method='quadratic')
+    out_smooth = cube.to_momentmap(method='quadratic', smooth=5, polyorder=3)
+    raw = np.asarray(out_raw.data)
+    smoothed = np.asarray(out_smooth.data)
+    assert smoothed.shape == raw.shape
+    assert np.all(np.isfinite(smoothed))
+    assert not np.allclose(smoothed, raw)
+
+
+def test_to_momentmap_smooth_zero_matches_unsmoothed(twhya_cube_path):
+    """smooth=0 (the default) should be a no-op — identical to omitting
+    the kwarg."""
+    pytest.importorskip("bettermoments")
+    cube = linecube(twhya_cube_path, FOV=4.0)
+    a = cube.to_momentmap(method='zeroth')
+    b = cube.to_momentmap(method='zeroth', smooth=0, polyorder=0)
+    np.testing.assert_array_equal(np.asarray(a.data), np.asarray(b.data))

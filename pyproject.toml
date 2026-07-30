@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astro-eddy"
-version = "3.0.1"
+version = "3.1.1"
 authors = [
     { name = "Richard Teague", email = "rteague@mit.edu" }
 ]
@@ -41,6 +41,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest>=7",
+    "numba>=0.58",
 ]
 docs = [
     "sphinx>=1.7.5",
@@ -48,6 +49,9 @@ docs = [
     "nbsphinx",
     "pygments>=2.4.1",
     "sphinx_rtd_theme",
+]
+structurefunction = [
+    "numba>=0.58",
 ]
 
 [project.urls]
@@ -92,4 +96,4 @@ where = ["."]
 include = ["eddy*"]
 
 [tool.setuptools.package-data]
-eddy = ["*.yml"]
+eddy = ["*.yml", "py.typed"]

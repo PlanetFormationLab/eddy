@@ -16,6 +16,20 @@ pip install -e ".[test,docs]"
 This installs `eddy` in editable mode together with the testing and
 documentation extras. Python 3.10+ is required.
 
+If your editor uses Pylance or Pyright (e.g. VS Code), append
+`--config-settings editable_mode=compat`:
+
+```bash
+pip install -e ".[test,docs]" --config-settings editable_mode=compat
+```
+
+setuptools' default PEP 660 editable install uses a `sys.meta_path`
+finder hook that Pylance can't follow, which surfaces as spurious
+`reportMissingImports` warnings on `from eddy import ...`. The `compat`
+mode writes the old-style `.pth` entry that adds the source tree to
+`sys.path` directly, which static analyzers understand. Editable
+behaviour is otherwise identical.
+
 If you plan to submit a pull request, consider enabling the pre-commit
 hooks so style/lint checks run on every commit:
 

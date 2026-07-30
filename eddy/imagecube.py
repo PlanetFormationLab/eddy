@@ -647,11 +647,13 @@ class imagecube(object):
 
         # Remove shadowed pixels.
         # TODO: Check how this handles the bottom side of the disk.
+        # jnp.where for consistency with the rest of the deprojection code;
+        # the trig ops above and the griddata call below still require
+        # concrete values, so this alone does not make the method traceable.
 
-        if inc < 0.0:
-            y_dep = np.maximum.accumulate(y_dep, axis=0)
-        else:
-            y_dep = np.minimum.accumulate(y_dep[::-1], axis=0)[::-1]
+        y_dep = jnp.where(inc < 0.0,
+                          np.maximum.accumulate(y_dep, axis=0),
+                          np.minimum.accumulate(y_dep[::-1], axis=0)[::-1])
 
         # Rotate and recenter the disk.
 
@@ -781,8 +783,11 @@ class imagecube(object):
                 in [arcsec]. This will override the analytical form.
             shadowed (Optional[bool]): Whether to use the slower, but more
                 robust method for deprojecting pixel values.
-            rgrid (Optional[array]): Radial grid in [arcsec].
-            tgrid (Optional[array]): Azimuthal grid in [degrees].
+            rgrid (Optional[array]): Radial grid in [arcsec]. Defaults to
+                ``np.arange(0, self.xaxis.max(), self.dpix)``.
+            tgrid (Optional[array]): Azimuthal grid in [radians] on
+                ``[-pi, pi]``. Defaults to
+                ``np.linspace(-pi, pi, self.xaxis.size)``.
             griddata_kwargs (Optional[dict]): Kwargs to pass to
                 ``scipy.interpolate.griddata``.
 
