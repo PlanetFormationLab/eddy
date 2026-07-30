@@ -90,6 +90,11 @@ select = ["E", "F", "W"]
 # importing the submodules; that triggers E402 (module-level import not
 # at top of file) which is the desired idiom here, not a bug.
 "eddy/__init__.py" = ["E402"]
+# test_structurefunction.py gates the whole module on numba via
+# pytest.importorskip("numba") before importing the structure-function
+# entry points, so those imports must sit below the skip guard (E402),
+# which is intentional here, not a bug.
+"tests/test_structurefunction.py" = ["E402"]
 
 [tool.setuptools.packages.find]
 where = ["."]

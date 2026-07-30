@@ -2225,7 +2225,6 @@ class StructureFunction2D:
         else:
             w = np.maximum(np.abs(S2), floor_frac * plateau)
 
-        S2_masked = S2[mask]
         w_masked = w[mask]
 
         def model(mp):
