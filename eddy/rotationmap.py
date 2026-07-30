@@ -495,7 +495,9 @@ class rotationmap(momentmap):
                 dvelo += [dvelo_tmp[0]]
             elif niter > 1:
                 scatter = 1e-10 * np.random.randn(dvelo_tmp.size)
-                weights = np.where(dvelo_tmp != 0.0, 1.0 / dvelo_tmp, 0.0)
+                weights = np.divide(1.0, dvelo_tmp,
+                                    out=np.zeros_like(dvelo_tmp),
+                                    where=dvelo_tmp != 0.0)
                 weights = weights + scatter.reshape(weights.shape)
                 w_mu = np.average(velo_tmp, weights=weights, axis=0)
                 wstd = np.sum(weights * (velo_tmp - w_mu[None, :])**2, axis=0)
