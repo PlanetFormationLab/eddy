@@ -2918,7 +2918,7 @@ class StructureFunction2DStack:
             * ``frac_of_data_total``: ``sum_m frac_of_data``, ``(N_ref,)``.
             * ``popt``, ``perr``: the raw fit outputs.
         """
-        popt, perr = self.fit_spiral(modes=modes, axis=axis, p0=p0)
+        popt, perr, _ = self.fit_spiral(modes=modes, axis=axis, p0=p0)
         offset = popt[:, 0]
         amps = popt[:, 1:]
         power = amps ** 2
