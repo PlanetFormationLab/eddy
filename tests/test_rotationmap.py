@@ -81,3 +81,26 @@ def test_fit_map_returns_percentiles(hd163296_rotationmap):
     assert np.all(np.isfinite(pcts))
 
 
+def test_make_model_includes_radial_velocity(hd163296_rotationmap):
+    """``vr_100``/``vr_q`` must perturb ``_make_model``'s output. Guards
+    against a repeat of the regression where the radial velocity term was
+    silently dropped from the sky-projected model."""
+    base_params = {
+        'x0': 0.0, 'y0': 0.0, 'PA': 312.0, 'mstar': 2.0, 'vlsr': 5.7e3,
+        'inc': 46.7, 'dist': 101.0,
+    }
+
+    no_rad = hd163296_rotationmap.verify_params_dictionary(dict(base_params))
+    assert no_rad['vradial'] is False
+    model_no_rad = hd163296_rotationmap._make_model(no_rad)
+
+    with_rad = hd163296_rotationmap.verify_params_dictionary(
+        dict(base_params, vr_100=500.0, vr_q=0.0))
+    assert with_rad['vradial'] is True
+    model_with_rad = hd163296_rotationmap._make_model(with_rad)
+
+    assert not np.array_equal(np.asarray(model_no_rad),
+                               np.asarray(model_with_rad))
+    assert np.all(np.isfinite(model_with_rad))
+
+
