@@ -272,6 +272,109 @@ def test_measure_heuristics_returns_finite_scalars():
     assert T1a_raw == pytest.approx(2.0 * sig_hat ** 2)
 
 
+def _empty_the_largest_lags(res, keep_x, keep_y=None):
+    """Emulate ``_s2_kernel`` on an annulus whose lag range runs off the grid:
+    the largest lags get no pairs, so ``counts`` is 0 and ``S_2`` is left at
+    its initialized 0.0 -- indistinguishable, without ``counts``, from a
+    genuine ``S_2 = 0``. ``keep_y=None`` leaves the azimuthal slice fully
+    populated, which is the real geometry: a ring near the edge of the map
+    loses its large *radial* lags while still spanning 360 deg."""
+    cx, cy = res.max_lag_x, res.max_lag_y
+    res.counts[cx + keep_x:, cy] = 0
+    res.S2_x[keep_x:] = 0.0
+    if keep_y is not None:
+        res.counts[cx, cy + keep_y:] = 0
+        res.S2_y[keep_y:] = 0.0
+
+
+def _old_pooled_plateau(res, frac=0.5):
+    """The plateau eddy computed before the ``counts`` mask: outer-lag median
+    with unpopulated bins read as genuine zeros."""
+    vals = []
+    for lags, s2 in ((res.lags_x, res.S2_x), (res.lags_y, res.S2_y)):
+        sel = np.asarray(s2)[lags >= frac * lags[-1]]
+        vals.append(sel[np.isfinite(sel)])
+    return float(np.median(np.concatenate(vals)))
+
+
+def test_plateau_and_half_power_lag_ignore_unpopulated_bins():
+    """An annulus whose radial lags run off the grid must still measure the
+    right plateau from its (intact) azimuthal slice, and must report an
+    unmeasurable radial scale as NaN rather than inventing a short one.
+
+    Before the ``counts`` mask the empty bins entered ``plateau``'s outer-lag
+    median as zeros, halving it; every half-power lag measured against that
+    level then came out spuriously short.
+    """
+    field = _smoothed_polar_field(n_r=100, n_phi=400)
+    dx, dy = 0.05, 3.0
+    x_axis = 0.5 + np.arange(field.shape[0]) * dx
+    stack = StructureFunction2DStack.from_array(
+        field, ref_rs=[1.5], x_axis=x_axis, dx=dx, dy=dy,
+        ref_band=0.05, max_lag_x=40, max_lag_y=40, n_bins=25,
+    )
+    res = stack.results[0]
+    plateau_before = res.plateau()
+    ell_r_before = res.half_power_lag("x")
+    ell_phi_before = res.half_power_lag("y")
+    assert np.isfinite([plateau_before, ell_r_before, ell_phi_before]).all()
+
+    # Radial slice dies past lag 5*dx = 0.25", i.e. short of ell_r itself.
+    _empty_the_largest_lags(res, keep_x=6)
+
+    # Plateau still comes off the intact azimuthal slice, ...
+    assert res.plateau() == pytest.approx(plateau_before, rel=0.1)
+    # ... the azimuthal scale is unmoved, ...
+    assert res.half_power_lag("y") == pytest.approx(ell_phi_before, rel=0.1)
+    # ... and the radial scale, no longer reachable, is NaN not a short lag.
+    assert np.isnan(res.half_power_lag("x"))
+
+    # The regression being guarded: reading the empty bins as zeros halves the
+    # plateau, and both lags measured against that level come out short.
+    old_plateau = _old_pooled_plateau(res)
+    assert old_plateau < 0.6 * plateau_before
+    assert res.half_power_lag("y", plateau=old_plateau) < 0.75 * ell_phi_before
+    assert res.half_power_lag("x", plateau=old_plateau) < 0.75 * ell_r_before
+
+    # The emptied bins are excluded, not read as zeros ...
+    _, s2_x = res._populated_slice("x")
+    assert np.all(np.isnan(s2_x[6:])) and np.all(np.isfinite(s2_x[:6]))
+    # ... and the stored slice itself is never mutated by the masking.
+    assert np.all(res.S2_x[6:] == 0.0)
+
+
+def test_heuristics_unchanged_when_outer_annuli_lose_their_largest_lags():
+    """Stationary field, and the outermost annuli lose their largest lags the
+    way real edge annuli do. Plateaus, ``ell_r`` and the radial trend T3 must
+    all be unmoved -- the failure mode was ell_r shrinking with radius, which
+    manufactures a T3 < 0 for a field that has no radial trend at all."""
+    field = _smoothed_polar_field(n_r=120, n_phi=140)
+    dx, dy = 0.05, 3.0
+    x_axis = 0.5 + np.arange(field.shape[0]) * dx
+    kw = dict(ref_rs=np.linspace(1.0, 5.5, 10), x_axis=x_axis, dx=dx, dy=dy,
+              ref_band=0.05, max_lag_x=25, max_lag_y=30, n_bins=25)
+    pristine = StructureFunction2DStack.from_array(field, **kw)
+    damaged = StructureFunction2DStack.from_array(field, **kw)
+    for res in damaged.results[-4:]:
+        _empty_the_largest_lags(res, keep_x=18, keep_y=22)
+
+    np.testing.assert_allclose(damaged.plateaus(), pristine.plateaus(),
+                               rtol=0.2)
+    T1b_p, T3_p = pristine.measure_heuristics()[1], pristine.measure_heuristics()[4]
+    T1b_d, T3_d = damaged.measure_heuristics()[1], damaged.measure_heuristics()[4]
+    assert T1b_d == pytest.approx(T1b_p, rel=0.05)
+    assert T3_d == pytest.approx(T3_p, abs=0.05)
+
+
+def test_populated_slice_rejects_bad_axis():
+    """``_populated_slice`` keeps ``half_power_lag``'s axis validation."""
+    field = _smoothed_polar_field()
+    res = StructureFunction2D.from_array(field, dx=0.05, dy=3.0,
+                                         max_lag_x=15, max_lag_y=20)
+    with pytest.raises(ValueError, match="axis must be"):
+        res.half_power_lag(axis="z")
+
+
 def test_measure_heuristics_all_zero_weights_raises():
     """A stack with no measurable correlation scale (constant field -> zero
     S_2 -> NaN half-power lags -> zero reliability weights) must raise a

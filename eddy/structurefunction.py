@@ -1631,6 +1631,47 @@ class StructureFunction2D:
         return self.S2.shape[1] // 2
 
     @property
+    def counts_x(self):
+        """Pair counts on the radial slice, aligned with :attr:`S2_x`."""
+        return self.counts[self.max_lag_x:, self.max_lag_y]
+
+    @property
+    def counts_y(self):
+        """Pair counts on the azimuthal slice, aligned with :attr:`S2_y`."""
+        return self.counts[self.max_lag_x, self.max_lag_y:]
+
+    def _populated_slice(self, axis):
+        """One on-axis slice, with unpopulated lag bins masked to ``nan``.
+
+        :func:`_s2_kernel` leaves a lag bin with no finite pairs at its
+        initialized ``0.0``, indistinguishable from a genuine ``S_2 = 0``.
+        Any statistic that reduces over a whole slice (:meth:`plateau`) or
+        hunts for a level crossing (:meth:`half_power_lag`) has to drop those
+        bins explicitly: an annulus whose lag range runs off the grid -- or
+        into a deprojection mask -- otherwise reports a plateau pulled towards
+        zero, and with it a correspondingly short correlation scale. The GRF
+        fit already masks the same bins (``counts > 0`` in :meth:`fit_GRF`),
+        so this keeps the model-free and fitted paths consistent.
+
+        Returns:
+            tuple: ``(lags, S2)``, the lag axis and a NaN-masked *copy* of the
+            slice (``S2_x`` / ``S2_y`` themselves are never mutated). Objects
+            carrying no real pair counts (``counts`` defaulted to ones, as
+            :func:`gaussian_beam_s2` does) are returned unmasked.
+        """
+        if axis == "x":
+            lags, s2, cnt = self.lags_x, self.S2_x, self.counts_x
+        elif axis == "y":
+            lags, s2, cnt = self.lags_y, self.S2_y, self.counts_y
+        else:
+            raise ValueError("axis must be 'x' or 'y', got {!r}.".format(axis))
+        s2 = np.array(s2, dtype=float)
+        cnt = np.asarray(cnt)
+        if cnt.shape == s2.shape:
+            s2[cnt <= 0] = np.nan
+        return np.asarray(lags), s2
+
+    @property
     def extent(self):
         """Matplotlib ``extent`` for ``imshow(S2)``: (l_y_min, l_y_max,
         l_x_min, l_x_max). Axis 0 is plotted on the y-axis."""
@@ -1955,7 +1996,10 @@ class StructureFunction2D:
         radial and azimuthal slices and returns a robust statistic,
         ``median`` by default, so a single noisy outlier (common in a
         denoised / low-pair-count slice) does not set the level the way
-        ``np.nanmax`` would.
+        ``np.nanmax`` would. Lag bins with no contributing pairs are
+        excluded (see :meth:`_populated_slice`) -- pooling them would drag
+        the plateau towards zero on any annulus whose lag range leaves the
+        grid or the deprojection mask.
 
         Args:
             frac (float): Fraction of the lag range treated as "large lag".
@@ -1966,10 +2010,11 @@ class StructureFunction2D:
             float: the plateau estimate (``nan`` if no finite outer cells).
         """
         vals = []
-        for lags, s2 in ((self.lags_x, self.S2_x), (self.lags_y, self.S2_y)):
+        for axis in ("x", "y"):
+            lags, s2 = self._populated_slice(axis)
             if lags.size == 0:
                 continue
-            sel = np.asarray(s2)[lags >= frac * lags[-1]]
+            sel = s2[lags >= frac * lags[-1]]
             vals.append(sel[np.isfinite(sel)])
         pooled = np.concatenate(vals) if vals else np.array([])
         if pooled.size == 0:
@@ -1983,7 +2028,10 @@ class StructureFunction2D:
         crosses half its plateau (``= 1.18 ell`` for a Gaussian kernel, but
         no Gaussian assumption is made). Located by linear interpolation of
         the FIRST upward crossing, so it is robust to non-monotonic wiggles
-        at larger lag.
+        at larger lag. Unpopulated lag bins are excluded rather than read as
+        ``S_2 = 0`` (see :meth:`_populated_slice`); if the bin below the
+        crossing is itself empty the crossing bin's own lag is returned,
+        there being nothing to interpolate from.
 
         Args:
             axis ({'x', 'y'}): ``'x'`` -> radial slice ``S2_x`` (lag in the
@@ -1998,26 +2046,21 @@ class StructureFunction2D:
             float: the crossing lag in that axis's units (``nan`` if the
             slice never reaches the level within the lag range).
         """
-        if axis == "x":
-            lags, s2 = self.lags_x, self.S2_x
-        elif axis == "y":
-            lags, s2 = self.lags_y, self.S2_y
-        else:
-            raise ValueError("axis must be 'x' or 'y', got {!r}.".format(axis))
+        lags, s2 = self._populated_slice(axis)
         if plateau is None:
             plateau = self.plateau()
         target = level * plateau
         if not np.isfinite(target) or target <= 0:
             return float("nan")
-        above = np.isfinite(s2) & (np.asarray(s2) >= target)
+        above = np.isfinite(s2) & (s2 >= target)
         if not above.any():
             return float("nan")
         i = int(np.argmax(above))                  # first crossing index
         if i == 0:
             return float(lags[0])
         x0, x1, y0, y1 = lags[i - 1], lags[i], s2[i - 1], s2[i]
-        if y1 == y0:
-            return float(x1)
+        if not np.isfinite(y0) or y1 == y0:
+            return float(x1)                       # nothing to interpolate from
         return float(x0 + (target - y0) * (x1 - x0) / (y1 - y0))
 
     def reliability_weight(self, kind="counts"):
@@ -2048,9 +2091,7 @@ class StructureFunction2D:
             these are quick single-annulus proxies.
         """
         if kind == "counts":
-            cx = self.counts[self.max_lag_x:, self.max_lag_y]
-            cy = self.counts[self.max_lag_x, self.max_lag_y:]
-            w = np.nansum(cx) + np.nansum(cy)
+            w = np.nansum(self.counts_x) + np.nansum(self.counts_y)
             return float(w) if np.isfinite(w) else 0.0
         if kind == "neff":
             ell_r = self.half_power_lag("x")
@@ -2918,7 +2959,7 @@ class StructureFunction2DStack:
             * ``frac_of_data_total``: ``sum_m frac_of_data``, ``(N_ref,)``.
             * ``popt``, ``perr``: the raw fit outputs.
         """
-        popt, perr = self.fit_spiral(modes=modes, axis=axis, p0=p0)
+        popt, perr, _ = self.fit_spiral(modes=modes, axis=axis, p0=p0)
         offset = popt[:, 0]
         amps = popt[:, 1:]
         power = amps ** 2
