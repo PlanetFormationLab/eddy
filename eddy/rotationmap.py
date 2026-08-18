@@ -125,6 +125,11 @@ class rotationmap(momentmap):
         low spatial resolution data, or for rotation maps made via the
         intensity-weighted average velocity.
 
+        A radial velocity component, ``v_r(r) = vr_100 * (r / 100)^vr_q``, can
+        be added on top of the rotation curve (whether Keplerian or power-law)
+        by setting ``params['vr_100']`` (and ``params['vr_q']``), e.g. to
+        capture a disk wind or infall signature.
+
         .. _Rosenfeld et al. (2013): https://ui.adsabs.harvard.edu/abs/2013ApJ...774...16R/abstract
 
         Args:
@@ -1211,7 +1216,7 @@ class rotationmap(momentmap):
         fitting and fill in defaults for any that are missing. Sets the
         rotation velocity function (``'vfunc'``) based on whether a power-law
         profile or Keplerian profile is requested, and flags whether a vortex
-        component should be included.
+        or radial velocity component should be included.
 
         Args:
             params (dict): Dictionary of model parameters, as passed to
@@ -1245,6 +1250,10 @@ class rotationmap(momentmap):
                 raise ValueError("Must specify by `r0_vortex` and `p0_vortex'.")
         else:
             params['vortex'] = False
+
+        # Radial velocity component.
+
+        params['vradial'] = params['vr_100'] is not None
 
         # Deprojection properties.
 
@@ -1602,6 +1611,11 @@ class rotationmap(momentmap):
         vpow = (rvals * params['dist'] / 100.)**params['vp_q']
         return params['vp_100'] * vpow
 
+    def _vrad(self, rvals, params):
+        """Power-law radial velocity profile."""
+        vrad = (rvals * params['dist'] / 100.)**params['vr_q']
+        return params['vr_100'] * vrad
+
     def _vpow_pressure(self, rvals, tvals, zvals, params):
         """Power-law rotation with pressure term."""
         vpow = self._vpow(rvals, tvals, zvals, params)
@@ -1766,8 +1780,8 @@ class rotationmap(momentmap):
             rvals = 1.0 / (2.0 / rvals - 1.0 / a)
             #tvals = jnp.arcsin(xvals / rvals)
 
-        # Calculate the velocity profile and project. This includes an
-        # additional component from the vortex.
+        # Calculate the velocity profile and project. This includes
+        # additional components from the vortex and radial velocity.
 
         vphi = params['vfunc'](rvals, tvals, zvals, params)
         vphi_proj = self._proj_vphi(vphi, tvals, params)
@@ -1775,8 +1789,13 @@ class rotationmap(momentmap):
             vvor_proj = self._make_model_vortex(rvals, tvals, params)
         else:
             vvor_proj = 0.0
+        if params['vradial']:
+            vrad_proj = self._proj_vrad(self._vrad(rvals, params),
+                                         tvals, params)
+        else:
+            vrad_proj = 0.0
 
-        v0 = vphi_proj + vvor_proj + params['vlsr']
+        v0 = vphi_proj + vvor_proj + vrad_proj + params['vlsr']
 
         # Convolve if necessary.
 
