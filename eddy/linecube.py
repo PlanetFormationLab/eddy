@@ -400,7 +400,7 @@ class linecube(imagecube):
                 Required when ``match`` is not given.
             lags_y (Optional[ndarray]): 1D positive lags along axis 1.
                 Required when ``match`` is not given.
-            match (Optional[StructureFunction2D]): Empirical result
+            match (Optional[StructureFunction]): Empirical result
                 whose ``lags_x``, ``lags_y``, ``counts``, and
                 ``noise_mask`` (if set) are inherited as defaults.
             sigma2 (Optional[float]): Per-pixel noise variance. If
@@ -421,19 +421,19 @@ class linecube(imagecube):
             x_label, y_label (str): Lag-axis labels.
 
         Returns:
-            :class:`eddy.structurefunction.StructureFunction2D`
+            :class:`eddy.structurefunction.StructureFunction`
         """
         from .structurefunction import (
-            StructureFunction2D,
+            StructureFunction,
             gaussian_beam_s2 as _gaussian_beam_s2,
         )
 
         # Support the legacy positional form gaussian_beam_s2(emp) where
-        # emp is a StructureFunction2D passed as lags_x.
-        if isinstance(lags_x, StructureFunction2D):
+        # emp is a StructureFunction passed as lags_x.
+        if isinstance(lags_x, StructureFunction):
             import warnings
             warnings.warn(
-                "Passing a StructureFunction2D as the first positional "
+                "Passing a StructureFunction as the first positional "
                 "argument to gaussian_beam_s2 is deprecated; use "
                 "gaussian_beam_s2(match=emp) instead.",
                 DeprecationWarning, stacklevel=2,
@@ -492,7 +492,7 @@ class linecube(imagecube):
         ``r_in <= r <= r_out`` (matching :meth:`estimate_cube_RMS`'s
         convention: use ``r_in > 0`` to exclude residual emission in
         the center, ``r_out`` to exclude noisy edges), passed to
-        :meth:`eddy.structurefunction.StructureFunction2D.from_array`,
+        :meth:`eddy.structurefunction.StructureFunction.calculate`,
         and the per-channel results are combined via pair-count-weighted
         averaging.
 
@@ -524,15 +524,15 @@ class linecube(imagecube):
             n_bins (int): Radial bins for the azimuthal average.
             log_spaced (bool): Log-spaced radial bins.
             return_per_channel (bool): If ``True``, also return the
-                list of per-channel :class:`StructureFunction2D`
+                list of per-channel :class:`StructureFunction`
                 results.
             symmetrize (bool): Forwarded to
-                :meth:`StructureFunction2D.from_array`. Noise has
+                :meth:`StructureFunction.calculate`. Noise has
                 no preferred radial direction, so the default ``True``
                 is almost always what you want.
 
         Returns:
-            ``StructureFunction2D`` (combined across channels), or
+            ``StructureFunction`` (combined across channels), or
             ``(combined, per_channel_list)`` if ``return_per_channel``.
 
         Notes:
@@ -542,7 +542,7 @@ class linecube(imagecube):
             ``S_2``. Reload with ``fill=np.nan`` or set ``r_out`` to
             exclude that region.
         """
-        from .structurefunction import StructureFunction2D
+        from .structurefunction import StructureFunction
 
         user_channels = channels
         if channels is None:
@@ -571,11 +571,13 @@ class linecube(imagecube):
         for c in channels:
             chan = np.where(keep, np.asarray(self.data[c], dtype=float),
                             np.nan)
-            sf = StructureFunction2D.from_array(
+            # Sky-plane pixels: both axes are arcsec, so this is a
+            # Cartesian grid and the azimuthal average S2_i is meaningful.
+            sf = StructureFunction.calculate(
                 chan, dx=dpix, dy=dpix,
                 max_lag_x=max_lag_x, max_lag_y=max_lag_y,
                 n_bins=n_bins, log_spaced=log_spaced,
-                symmetrize=symmetrize,
+                symmetrize=symmetrize, grid="cartesian",
             )
             per_channel.append(sf)
 
