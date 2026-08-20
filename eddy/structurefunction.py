@@ -611,6 +611,89 @@ def gaussian_beam_s2(bmaj, bmin, bpa, lags_x, lags_y, sigma2,
     )
 
 
+def _gaussian_beam_kernel(shape, dpix, bmaj, bmin, bpa):
+    """Centred, unit-power Gaussian beam kernel on an image grid.
+
+    ``||kernel||_2 == 1``, so convolving unit-variance white noise with it
+    produces a unit-variance correlated field. Same beam frame as
+    :func:`gaussian_beam_s2`: ``bpa`` is the FITS position angle measured
+    east of north, and with eddy's axis 0 = +DEC, axis 1 = -RA the
+    major-axis unit vector is ``(cos PA, -sin PA)`` in (axis 0, axis 1).
+
+    Args:
+        shape (tuple): ``(n_axis0, n_axis1)`` image shape.
+        dpix (float): Pixel scale, same units as ``bmaj`` / ``bmin``.
+            Square pixels are assumed (as elsewhere in eddy).
+        bmaj, bmin (float): Beam FWHM.
+        bpa (float): Beam position angle [deg].
+
+    Returns:
+        ndarray: the kernel, shape ``shape``.
+    """
+    n0, n1 = shape
+    l0 = (np.arange(n0) - n0 // 2) * float(dpix)
+    l1 = (np.arange(n1) - n1 // 2) * float(dpix)
+    L0, L1 = np.meshgrid(l0, l1, indexing="ij")
+
+    phi = np.radians(float(bpa))
+    cos_p, sin_p = np.cos(phi), np.sin(phi)
+    l_maj = L0 * cos_p - L1 * sin_p
+    l_min = L0 * sin_p + L1 * cos_p
+
+    sigma_maj = float(bmaj) * _FWHM_TO_SIGMA
+    sigma_min = float(bmin) * _FWHM_TO_SIGMA
+    kernel = np.exp(-0.5 * ((l_maj / sigma_maj) ** 2
+                            + (l_min / sigma_min) ** 2))
+    return kernel / np.sqrt(np.sum(kernel ** 2))
+
+
+def gaussian_beam_realization(shape, dpix, bmaj, bmin, bpa, sigma,
+                              n_draws=1, rng=None):
+    """Draw white pixel noise convolved with a 2D Gaussian beam.
+
+    The realization counterpart of :func:`gaussian_beam_s2`: that function
+    returns the analytic ``S_2`` of this field, and measuring ``S_2`` on
+    enough of these draws reproduces it. Use this for the "naive PSF" null,
+    and :meth:`StructureFunction.draw_realization` for the empirical one
+    that also carries the imaging pipeline's extra correlated structure
+    (CLEAN residuals, sidelobe leakage, deconvolution bias).
+
+    The beam kernel is normalized to unit power, so the output has per-pixel
+    standard deviation ``sigma`` regardless of the beam size, matching the
+    ``sigma2 = sigma ** 2`` that :func:`gaussian_beam_s2` predicts a
+    ``2 * sigma2`` plateau from.
+
+    Args:
+        shape (tuple): ``(n_axis0, n_axis1)`` image shape.
+        dpix (float): Pixel scale in the same units as ``bmaj`` / ``bmin``
+            (typically arcsec). Square pixels are assumed.
+        bmaj, bmin (float): Beam FWHM.
+        bpa (float): Beam position angle [deg], FITS convention (east of
+            north), as in :func:`gaussian_beam_s2`.
+        sigma (float): Per-pixel noise standard deviation of the output.
+        n_draws (int): Number of independent realizations. The kernel is
+            built once and reused across draws.
+        rng: ``numpy.random.Generator``, integer seed, or ``None``.
+
+    Returns:
+        ndarray: ``shape`` if ``n_draws == 1``, else ``(n_draws, *shape)``.
+        The squeeze at ``n_draws == 1`` matches
+        :meth:`StructureFunction.draw_realization`; reshape if you always
+        want the stacked form.
+    """
+    if int(n_draws) < 1:
+        raise ValueError("n_draws must be >= 1.")
+    rng = _as_rng(rng)
+    kernel_k = np.fft.fft2(np.fft.ifftshift(
+        _gaussian_beam_kernel(shape, dpix, bmaj, bmin, bpa)))
+    out = np.stack([
+        np.fft.ifft2(
+            np.fft.fft2(rng.standard_normal(shape) * float(sigma)) * kernel_k
+        ).real
+        for _ in range(int(n_draws))])
+    return out[0] if int(n_draws) == 1 else out
+
+
 # -- 1D AZIMUTHAL SPIRAL MODEL -- #
 
 

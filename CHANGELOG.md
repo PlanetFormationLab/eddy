@@ -74,6 +74,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     spectrum is now reported via a `RuntimeWarning` past 1%, since that
     clip *adds* variance and is 17% for a single-realization input,
     falling to ~3% once ~100 are averaged.
+  - **`gaussian_beam_realization(shape, dpix, bmaj, bmin, bpa, sigma, ...)`**
+    — beam-convolved white noise, the realization counterpart of
+    `gaussian_beam_s2` and the "naive PSF" null to `draw_realization`'s
+    empirical one. Shares that function's beam frame (FITS PA east of
+    north), and the kernel is normalized to unit power so the output sits
+    at the requested per-pixel `sigma` whatever the beam size. A regression
+    test measures `S_2` on the draws and requires it to match
+    `gaussian_beam_s2` an order of magnitude better than it matches the
+    same beam rotated 90 deg, so an axis swap cannot pass.
+  - **`imagecube.noise_realization(method, ...)`** — the cube/map-level
+    convenience for both backends, filling the spatial shape, `dpix` and
+    beam from the object the way `linecube.gaussian_beam_s2` already does.
+    `sigma` defaults to `estimate_cube_RMS()` on a `linecube`; on an image
+    with no line-free channels it is required rather than invented.
 - **`grid=` argument on every bare-array structure-function entry point**
   (`calculate_structure_function`, `calculate_structure_function_stack`,
   the `calculate` classmethods, and

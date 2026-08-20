@@ -20,6 +20,8 @@ from eddy.structurefunction import (
     calculate_s2,
     extract_basic_profiles,
     combine_s2_weighted,
+    gaussian_beam_realization,
+    gaussian_beam_s2,
     grf_s2_2d_global,
     S2phi,
 )
@@ -435,6 +437,105 @@ def test_gaussian_beam_s2_matches_empirical_grid(twhya_linecube):
     assert np.all(ana.S2 >= -1e-9)
     cx, cy = ana.S2.shape[0] // 2, ana.S2.shape[1] // 2
     assert ana.S2[cx, cy] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_gaussian_beam_realization_shapes_and_sigma():
+    """Unit-power kernel: the per-pixel sigma of the draw is the requested
+    one whatever the beam size, and the ``n_draws == 1`` squeeze matches
+    ``draw_realization``."""
+    shape, dpix, sigma = (96, 96), 0.02, 3.0
+    one = gaussian_beam_realization(shape, dpix, 0.30, 0.12, 37.0, sigma,
+                                    rng=0)
+    assert one.shape == shape
+    many = gaussian_beam_realization(shape, dpix, 0.30, 0.12, 37.0, sigma,
+                                     n_draws=4, rng=0)
+    assert many.shape == (4, *shape)
+
+    # Convolving with a unit-power kernel preserves the white-noise sigma,
+    # so a beam twice the size must not dilute it. Measured on a grid big
+    # enough to hold a few hundred independent beams -- the sampling error
+    # on a correlated field goes as the beam count, not the pixel count.
+    for bmaj, bmin in ((0.30, 0.12), (0.60, 0.24)):
+        draws = gaussian_beam_realization((256, 256), dpix, bmaj, bmin,
+                                          37.0, sigma, n_draws=16, rng=7)
+        assert np.std(draws) == pytest.approx(sigma, rel=0.05)
+
+    with pytest.raises(ValueError, match="n_draws"):
+        gaussian_beam_realization(shape, dpix, 0.3, 0.12, 0.0, sigma,
+                                  n_draws=0)
+
+
+def test_gaussian_beam_realization_recovers_gaussian_beam_s2():
+    """The measured ``S_2`` of the draws converges on the analytic
+    prediction they are the realization of.
+
+    An anisotropic beam at a non-trivial PA, so an axis swap or a sign
+    error in the beam frame cannot hide: the same comparison against a
+    beam rotated by 90 deg is required to miss by an order of magnitude
+    more, which is what makes the agreement meaningful rather than a
+    statement that both are roughly flat.
+    """
+    dpix, bmaj, bmin, bpa, sigma = 0.02, 0.30, 0.12, 37.0, 3.0
+    shape, max_lag = (128, 128), 16
+    rng = np.random.default_rng(0)
+
+    measured = None
+    for _ in range(40):
+        f = gaussian_beam_realization(shape, dpix, bmaj, bmin, bpa, sigma,
+                                      rng=rng)
+        s = StructureFunction.calculate(f, dx=dpix, dy=dpix,
+                                        max_lag_x=max_lag,
+                                        max_lag_y=max_lag, grid="cartesian")
+        measured = s if measured is None else measured.combine([s])
+
+    plateau = 2.0 * sigma ** 2
+    pred = gaussian_beam_s2(bmaj, bmin, bpa, measured.lags_x, measured.lags_y,
+                            sigma2=sigma ** 2, counts=measured.counts)
+    rms = np.sqrt(np.nanmean((measured.S2 - pred.S2) ** 2)) / plateau
+    assert rms < 0.02
+
+    wrong = gaussian_beam_s2(bmaj, bmin, bpa + 90.0, measured.lags_x,
+                             measured.lags_y, sigma2=sigma ** 2,
+                             counts=measured.counts)
+    rms_wrong = np.sqrt(np.nanmean((measured.S2 - wrong.S2) ** 2)) / plateau
+    assert rms_wrong > 10.0 * rms
+
+
+def test_noise_realization_both_backends(twhya_linecube):
+    """``imagecube.noise_realization`` fills shape/beam from the object for
+    both backends, defaults the analytic sigma from the cube RMS, and
+    rejects the arguments each backend cannot work without."""
+    shape = tuple(twhya_linecube.data.shape[-2:])
+
+    ana = twhya_linecube.noise_realization('analytic', rng=0)
+    assert ana.shape == shape
+    assert np.isfinite(ana).all()
+    # sigma defaulted from estimate_cube_RMS, so the draw sits at that level.
+    assert np.std(ana) == pytest.approx(
+        float(twhya_linecube.estimate_cube_RMS()), rel=0.3)
+
+    emp_s2 = twhya_linecube.noise_structure_function(
+        N=5, r_in=1.0, r_out=2.0, max_lag_x=6, max_lag_y=6, n_bins=15)
+    emp = twhya_linecube.noise_realization('empirical', S2=emp_s2, n_draws=3,
+                                           rng=0)
+    assert emp.shape == (3, *shape)
+    assert np.isfinite(emp).all()
+
+    with pytest.raises(ValueError, match="requires S2"):
+        twhya_linecube.noise_realization('empirical')
+    with pytest.raises(ValueError, match="analytic.*or.*empirical"):
+        twhya_linecube.noise_realization('bogus')
+
+
+def test_noise_realization_analytic_needs_sigma_without_channels(
+        hd163296_v0_path):
+    """A momentmap has no line-free channels to estimate an RMS from, so the
+    analytic backend must say so rather than draw at an invented level."""
+    cube = momentmap(hd163296_v0_path, FOV=4.0)
+    with pytest.raises(ValueError, match="requires sigma"):
+        cube.noise_realization('analytic')
+    out = cube.noise_realization('analytic', sigma=12.0, rng=0)
+    assert out.shape == tuple(cube.data.shape[-2:])
 
 
 @pytest.mark.slow
