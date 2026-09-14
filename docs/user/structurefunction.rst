@@ -80,11 +80,34 @@ Module functions
 Drawing realizations
 --------------------
 
+The forward direction of the analysis: draw fields with a known ``S_2`` to
+calibrate an estimator, or build a noise null to subtract from a
+measurement. :func:`~eddy.structurefunction.draw_polar_field` draws the
+parametric anisotropic GRF that ``fit_GRF`` models, on a grid from
+:func:`~eddy.structurefunction.make_polar_grid`.
+
 .. autofunction:: eddy.structurefunction.draw_polar_field
 
 .. autofunction:: eddy.structurefunction.make_polar_grid
 
 .. autofunction:: eddy.structurefunction.polar_covariance
+
+For a *noise* null there are two interchangeable backends, both sharing the
+beam frame of :func:`~eddy.structurefunction.gaussian_beam_s2`: the
+parametric :func:`~eddy.structurefunction.gaussian_beam_realization`
+(beam-convolved white noise, carrying only the PSF correlation), and the
+empirical :meth:`~eddy.structurefunction.StructureFunction.draw_realization`,
+which synthesizes from a measured ``S_2`` — typically
+:meth:`eddy.linecube.linecube.noise_structure_function` — and so also
+reproduces the imaging pipeline's extra correlated structure. Differencing
+ensembles built from each isolates how much apparent structure the naive PSF
+model misses. :meth:`eddy.imagecube.imagecube.noise_realization` is the
+cube-level entry point to both, filling the shape, ``dpix`` and beam from the
+object.
+
+.. autofunction:: eddy.structurefunction.gaussian_beam_realization
+
+.. automethod:: eddy.imagecube.imagecube.noise_realization
 
 
 Azimuthal spiral model
