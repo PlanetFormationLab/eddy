@@ -5,6 +5,109 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] – 2026-09-14
+
+### Changed
+- **Structure-function API renamed to the `calculate_` / `fit_` / `plot_`
+  convention, and the result classes dropped their `2D` suffix.** The
+  objects are now `StructureFunction` and `StructureFunctionStack`. Every
+  old spelling still works but emits a `DeprecationWarning` and will be
+  removed in 4.0:
+
+  | Old (3.1.x) | New |
+  |---|---|
+  | `StructureFunction2D` | `StructureFunction` |
+  | `StructureFunction2DStack` | `StructureFunctionStack` |
+  | `StructureFunction2D.from_array` | `StructureFunction.calculate` |
+  | `StructureFunction2DStack.from_array` | `StructureFunctionStack.calculate` |
+  | `momentmap.compute_structure_function` | `momentmap.calculate_structure_function` |
+  | `momentmap.compute_structure_function_stack` | `momentmap.calculate_structure_function_stack` |
+  | `StructureFunction2DStack.measure_heuristics` | `StructureFunctionStack.calculate_heuristics` |
+  | `StructureFunction2DStack.pairwise_error_heatmaps` | `StructureFunctionStack.calculate_pairwise_error_heatmaps` |
+  | `compute_s2` | `calculate_s2` |
+  | `structure_function_ensemble` | `calculate_structure_function_ensemble` |
+
+### Fixed
+- **`S2_i` is no longer returned in mixed units from the bare-array path.**
+  The azimuthal average bins on `sqrt(l_x^2 + l_y^2)`, so it is only
+  meaningful when the two axes share units; the momentmap polar pipeline
+  has always discarded it for that reason, but a direct
+  `StructureFunction2D.from_array(field, dx=<arcsec>, dy=<deg>)` returned a
+  plottable-looking array that equated one arcsec with one degree. It is
+  now `None` whenever `grid='polar'`. Tutorial 7 was plotting exactly this
+  curve and has been corrected to show the two slices on their own lag
+  axes.
+- **Radius/azimuth analyses now refuse a Cartesian grid.** `fit_GRF`,
+  `fit_spiral`, `calculate_heuristics`, `calculate_anisotropy_heatmap` and
+  `calculate_azimuthal_heatmap(arclength=True)` raise a `ValueError` on a
+  `grid='cartesian'` result instead of interpreting its second axis as an
+  angle in degrees. `linecube.noise_structure_function` and
+  `gaussian_beam_s2`, which build sky-plane surfaces, now declare
+  themselves `'cartesian'`.
+
+  The class aliases are served through a module-level `__getattr__`
+  (PEP 562) rather than as subclasses, so `isinstance` checks against the
+  old names are unaffected. A plain `import eddy` does not warn.
+
+### Added
+- **Field realizations.** Ported from the structure-function papers'
+  `parametric_field.py` / `noise.py`, reusing eddy's existing kernels
+  (`_ps_cov`, `ell_r`, `ell_phi`) rather than duplicating them:
+  - **`draw_polar_field(r, phi, ...)`** — draw the anisotropic GRF from its
+    parameters, i.e. the field the `fit_GRF` forward models describe.
+    `method='exact'` factors the full Paciorek–Schervish covariance
+    (`polar_covariance`, with a clipped-eigendecomposition fallback when
+    Cholesky fails on an ill-conditioned smooth kernel, and no diagonal
+    jitter so `S_2` is not biased up at small lag); `method='convolution'`
+    (default) is a spatially-varying Gaussian process convolution targeting
+    the same covariance without ever forming an `N x N` matrix — 0.11 s for
+    four 200x400 draws, where the exact route would need 51 GB.
+  - **`make_polar_grid(r_min, r_max, n_r, n_phi)`** — the matching grid
+    constructor (full-period azimuth, no duplicated endpoint).
+  - **`StructureFunction.draw_realization(...)`** — Wiener–Khinchin spectral
+    synthesis from a *measured* `S_2`, one FFT per draw. Requires
+    `grid='cartesian'`: synthesis assumes stationarity, which the polar GRF
+    breaks by construction. Two changes from the upstream implementation:
+    the default per-pixel variance is now `plateau()/2` rather than
+    `max(S2)/2` (the noisy tail biases the latter high — 17% in a
+    representative test), and the negative power clipped out of the
+    spectrum is now reported via a `RuntimeWarning` past 1%, since that
+    clip *adds* variance and is 17% for a single-realization input,
+    falling to ~3% once ~100 are averaged.
+  - **`gaussian_beam_realization(shape, dpix, bmaj, bmin, bpa, sigma, ...)`**
+    — beam-convolved white noise, the realization counterpart of
+    `gaussian_beam_s2` and the "naive PSF" null to `draw_realization`'s
+    empirical one. Shares that function's beam frame (FITS PA east of
+    north), and the kernel is normalized to unit power so the output sits
+    at the requested per-pixel `sigma` whatever the beam size. A regression
+    test measures `S_2` on the draws and requires it to match
+    `gaussian_beam_s2` an order of magnitude better than it matches the
+    same beam rotated 90 deg, so an axis swap cannot pass.
+  - **`imagecube.noise_realization(method, ...)`** — the cube/map-level
+    convenience for both backends, filling the spatial shape, `dpix` and
+    beam from the object the way `linecube.gaussian_beam_s2` already does.
+    `sigma` defaults to `estimate_cube_RMS()` on a `linecube`; on an image
+    with no line-free channels it is required rather than invented.
+- **`grid=` argument on every bare-array structure-function entry point**
+  (`calculate_structure_function`, `calculate_structure_function_stack`,
+  the `calculate` classmethods, and
+  `calculate_structure_function_ensemble`), defaulting to `'polar'` — the
+  `imagecube.polar_deprojection` layout of axis 0 = radius [arcsec],
+  axis 1 = azimuth [deg]. The kernel is a generic regular-grid lag
+  estimator and cannot infer the geometry, so it is now declared rather
+  than assumed. Recorded on the result as `.grid`, propagated through
+  `combine` / `subtract` / `collapse`, and checked when two results are
+  combined (mixing a polar and a Cartesian `S_2` raises). The new
+  `GRID_TYPES` constant lists the accepted values.
+- **`calculate_structure_function(field, ...)`** and
+  **`calculate_structure_function_stack(field, ref_rs, ...)`** — module-level
+  functional entry points, surfaced at the top level (`from eddy import
+  calculate_structure_function`). They delegate to the `calculate`
+  classmethods, so the bare-array and sky-map (`momentmap`) routes now share
+  one verb.
+- Tests covering the module-level constructors, every rename alias, and the
+  package-root `__getattr__`.
+
 ## [3.1.1] – 2026-07-30
 
 ### Fixed

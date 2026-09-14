@@ -152,7 +152,7 @@ class momentmap(imagecube):
 
     # -- STRUCTURE FUNCTION -- #
 
-    def compute_structure_function(self, x0=0.0, y0=0.0, inc=0.0, PA=0.0,
+    def calculate_structure_function(self, x0=0.0, y0=0.0, inc=0.0, PA=0.0,
                                    z0=None, psi=None, r_taper=None,
                                    q_taper=1.0, r_cavity=0.0, z_func=None,
                                    shadowed=False, rgrid=None, tgrid=None,
@@ -168,7 +168,7 @@ class momentmap(imagecube):
         (so all of the standard geometry kwargs apply), and the resulting
         regular grid is fed to the numba kernel in
         :mod:`eddy.structurefunction`. The result is a
-        :class:`~eddy.structurefunction.StructureFunction2D` whose two
+        :class:`~eddy.structurefunction.StructureFunction` whose two
         lag axes are radial lag in [arcsec] and azimuthal lag in [deg].
 
         Args:
@@ -206,7 +206,7 @@ class momentmap(imagecube):
                 the inward / outward asymmetry directly.
 
         Returns:
-            :class:`~eddy.structurefunction.StructureFunction2D`
+            :class:`~eddy.structurefunction.StructureFunction`
         """
         rgrid_out, tgrid_out, gridded, dr, dphi_deg = (
             self._structure_function_polar_grid(
@@ -224,7 +224,7 @@ class momentmap(imagecube):
             symmetrize=symmetrize,
         )
 
-    def compute_structure_function_stack(self, ref_rs, ref_band=0.0,
+    def calculate_structure_function_stack(self, ref_rs, ref_band=0.0,
                                          x0=0.0, y0=0.0, inc=0.0, PA=0.0,
                                          z0=None, psi=None, r_taper=None,
                                          q_taper=1.0, r_cavity=0.0,
@@ -240,7 +240,7 @@ class momentmap(imagecube):
         ``ref_r`` values; only the (much cheaper) kernel call runs N times.
         Use this when computing S_2 at many reference radii so the
         deprojection cost is paid only once. All other kwargs match
-        :meth:`compute_structure_function`.
+        :meth:`calculate_structure_function`.
 
         Args:
             ref_rs (sequence of float): Reference annulus radii [arcsec].
@@ -248,9 +248,9 @@ class momentmap(imagecube):
                 [arcsec]. Shared across all radii.
 
         Returns:
-            :class:`~eddy.structurefunction.StructureFunction2DStack`
+            :class:`~eddy.structurefunction.StructureFunctionStack`
         """
-        from .structurefunction import StructureFunction2DStack
+        from .structurefunction import StructureFunctionStack
 
         ref_rs = np.asarray(ref_rs, dtype=float)
         if ref_rs.ndim != 1 or ref_rs.size == 0:
@@ -275,7 +275,7 @@ class momentmap(imagecube):
             )
             for r0 in ref_rs
         ]
-        return StructureFunction2DStack(
+        return StructureFunctionStack(
             ref_rs=ref_rs, ref_band=float(ref_band), results=results,
             x_grid=rgrid_out, y_grid=tgrid_out, gridded=gridded,
         )
@@ -317,9 +317,9 @@ class momentmap(imagecube):
                                       ref_r, ref_band, n_bins, log_spaced,
                                       symmetrize=True):
         """Run the structure-function kernel on an already-deprojected
-        polar grid and build a :class:`StructureFunction2D`.
+        polar grid and build a :class:`StructureFunction`.
         """
-        from .structurefunction import StructureFunction2D
+        from .structurefunction import StructureFunction
 
         max_lag_x = (None if max_lag_r is None
                      else max(1, int(round(max_lag_r / dr))))
@@ -329,18 +329,37 @@ class momentmap(imagecube):
         ref_i_idx = (-1 if ref_r is None
                      else int(np.argmin(np.abs(rgrid_out - ref_r))))
 
-        # dx is arcsec and dy is degrees on a polar grid, so the
-        # sqrt(lx^2 + ly^2) isotropic bins mix incommensurate units.
-        # Pass S2_i=None to suppress the meaningless azimuthal average.
-        return StructureFunction2D.from_array(
+        # grid='polar' records that dx is arcsec and dy is degrees, which
+        # suppresses the mixed-units azimuthal average S2_i and unlocks the
+        # radius/azimuth analyses.
+        return StructureFunction.calculate(
             gridded, dx=dr, dy=dphi_deg,
             max_lag_x=max_lag_x, max_lag_y=max_lag_y,
             ref_i=ref_i_idx, ref_band=ref_band_idx,
             n_bins=n_bins, log_spaced=log_spaced, symmetrize=symmetrize,
-            S2_i=None,
+            grid="polar",
             x_grid=rgrid_out, y_grid=tgrid_out, gridded=gridded,
             ref=(None if ref_r is None else float(rgrid_out[ref_i_idx])),
             x_label="radial lag [arcsec]",
             y_label="azimuthal lag [deg]",
             azimuthal_axis="y",
         )
+
+    # -- DEPRECATED ALIASES (removal in eddy 4.0) -- #
+
+    def compute_structure_function(self, *args, **kwargs):
+        """Deprecated alias for :meth:`calculate_structure_function`."""
+        from .structurefunction import _warn_renamed
+        _warn_renamed("momentmap.compute_structure_function",
+                      "momentmap.calculate_structure_function",
+                      kind="method")
+        return self.calculate_structure_function(*args, **kwargs)
+
+    def compute_structure_function_stack(self, *args, **kwargs):
+        """Deprecated alias for
+        :meth:`calculate_structure_function_stack`."""
+        from .structurefunction import _warn_renamed
+        _warn_renamed("momentmap.compute_structure_function_stack",
+                      "momentmap.calculate_structure_function_stack",
+                      kind="method")
+        return self.calculate_structure_function_stack(*args, **kwargs)

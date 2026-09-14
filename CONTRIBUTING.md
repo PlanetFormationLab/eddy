@@ -87,6 +87,80 @@ or naming conventions.
   `jupyter nbconvert --execute --inplace docs/tutorials/<name>.ipynb`
   before committing.
 
+## Making a release
+
+Releases are cut manually from `master`. The version lives in two
+places and both must agree, or the built wheel and `eddy.__version__`
+will disagree at runtime:
+
+- `pyproject.toml` (`version = "..."`)
+- `eddy/__init__.py` (`__version__ = "..."`)
+
+1. **Open a release PR from a branch**, containing the version bump in
+   both files and the `CHANGELOG.md` heading change: rename the
+   accumulated `## [Unreleased]` section to `## [X.Y.Z] - YYYY-MM-DD`.
+   Every user-visible change should already have an entry there from
+   the PR that introduced it.
+
+2. **Check it locally** before merging:
+
+   ```bash
+   ruff check .
+   pytest -v
+   python -c "import eddy; print(eddy.__version__)"
+   ```
+
+   Building the docs needs `pandoc` on `PATH` (a system package, not a
+   pip one) because `nbsphinx` shells out to it for the tutorials:
+
+   ```bash
+   pip install -e ".[docs]"
+   sphinx-build -b html docs docs/_build/html
+   ```
+
+3. **Merge the PR**, then tag the merge commit on `master` and push the
+   tag. Tags carry a leading `v` and are annotated:
+
+   ```bash
+   git checkout master && git pull
+   git tag -a vX.Y.Z -m "eddy X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+4. **Build and upload.** There is no publish workflow; this is a local
+   `twine` step. Build from a clean tree so the sdist does not pick up
+   stray files, and keep the version's artifacts in `dist/`:
+
+   ```bash
+   pip install --upgrade build twine
+   python -m build
+   twine check dist/astro_eddy-X.Y.Z*
+   twine upload dist/astro_eddy-X.Y.Z*
+   ```
+
+   Upload the two artifacts for the new version only — passing a bare
+   `dist/*` re-submits every previous release and fails. A version
+   number cannot be reused on PyPI even after deletion, so check
+   `twine check` output before uploading.
+
+5. **Create the GitHub release** from the tag, pasting that version's
+   `CHANGELOG.md` section as the body:
+
+   ```bash
+   gh release create vX.Y.Z --title "eddy X.Y.Z" --notes-file -
+   ```
+
+6. **Confirm** the new version resolves and Read the Docs has built the
+   tag:
+
+   ```bash
+   pip index versions astro-eddy
+   ```
+
+Steps 3-5 have been missed before: `3.0.1` and `3.1.0` have no git tag,
+and `3.1.0` was never uploaded to PyPI at all (it is in the changelog
+but absent from the release history). Work through the list in order.
+
 ## Questions
 
 For anything else, open an issue or contact Richard Teague directly.

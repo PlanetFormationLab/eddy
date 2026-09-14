@@ -1057,6 +1057,79 @@ class imagecube(object):
         """Number of pixels in a beam."""
         return self.beamarea_arcsec / self.dpix**2.0
 
+    def noise_realization(self, method, sigma=None, S2=None, sigma2=None,
+                          n_draws=1, rng=None, shape=None):
+        """Draw noise images matching this object's beam and pixel grid.
+
+        Convenience wrapper filling the spatial shape, ``dpix`` and beam
+        (``bmaj``, ``bmin``, ``bpa``) from the object, so a null ensemble
+        does not have to re-plumb them at every call site. Two backends:
+
+        * ``'analytic'`` -- beam-convolved white noise
+          (:func:`eddy.structurefunction.gaussian_beam_realization`). Fast
+          and parametric, but carries only the PSF correlation.
+        * ``'empirical'`` -- spectral synthesis from a measured ``S_2``
+          (:meth:`eddy.structurefunction.StructureFunction.draw_realization`),
+          which also reproduces the imaging pipeline's extra correlated
+          structure. Get the input from
+          :meth:`eddy.linecube.linecube.noise_structure_function`.
+
+        The two are drop-in interchangeable -- same shape, same beam frame
+        -- so differencing ensembles built from each isolates how much
+        apparent structure the naive PSF model misses.
+
+        Args:
+            method ({'analytic', 'empirical'}): Backend selector.
+            sigma (Optional[float]): Per-pixel noise standard deviation,
+                ``'analytic'`` only. On a :class:`eddy.linecube.linecube`
+                this defaults to :meth:`estimate_cube_RMS`; on any other
+                image it is required, there being no line-free channels to
+                estimate it from.
+            S2 (Optional[StructureFunction]): Measured noise ``S_2``,
+                required for ``'empirical'``.
+            sigma2 (Optional[float]): Override the per-pixel variance of the
+                ``'empirical'`` backend. Defaults to that ``S_2``'s
+                :meth:`~eddy.structurefunction.StructureFunction.plateau`
+                halved.
+            n_draws (int): Number of independent realizations.
+            rng: ``numpy.random.Generator``, integer seed, or ``None``.
+            shape (Optional[tuple]): Override the output shape. Defaults to
+                the object's spatial shape (``data.shape[-2:]``), which is
+                what a matched null wants.
+
+        Returns:
+            ndarray: ``shape`` if ``n_draws == 1``, else
+            ``(n_draws, *shape)`` -- the same squeeze as
+            :meth:`~eddy.structurefunction.StructureFunction.draw_realization`.
+            Pass ``n_draws=cube.nchan`` to build a noise cube; reshape if
+            you need the stacked form even for a single channel.
+        """
+        from .structurefunction import gaussian_beam_realization
+
+        if shape is None:
+            shape = tuple(self.data.shape[-2:])
+
+        if method == 'analytic':
+            if sigma is None and hasattr(self, 'estimate_cube_RMS'):
+                sigma = float(self.estimate_cube_RMS())
+            if sigma is None:
+                raise ValueError(
+                    "method='analytic' requires sigma: this object has no "
+                    "estimate_cube_RMS to default it from.")
+            return gaussian_beam_realization(
+                shape, abs(self.dpix), self.bmaj, self.bmin, self.bpa,
+                sigma, n_draws=n_draws, rng=rng)
+
+        if method == 'empirical':
+            if S2 is None:
+                raise ValueError("method='empirical' requires S2.")
+            return S2.draw_realization(shape=shape, n_draws=n_draws,
+                                       rng=rng, sigma2=sigma2)
+
+        raise ValueError(
+            "method must be 'analytic' or 'empirical', got {!r}."
+            .format(method))
+
     @staticmethod
     def backend():
         """JAX backend the JIT'd helpers will run on ('cpu', 'gpu', or
