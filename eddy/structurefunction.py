@@ -2606,7 +2606,8 @@ class StructureFunction:
             return float("nan")
         return float(np.median(pooled) if stat == "median" else np.mean(pooled))
 
-    def half_power_lag(self, axis="x", level=0.5, plateau=None):
+    def half_power_lag(self, axis="x", level=0.5, plateau=None,
+                       min_bracket=2.0):
         """Lag at which a 1D slice first reaches ``level * plateau``.
 
         A model-free correlation-scale proxy: the lag where ``S_2`` first
@@ -2630,10 +2631,22 @@ class StructureFunction:
                 power).
             plateau (Optional[float]): Plateau to use; defaults to
                 :meth:`plateau`.
+            min_bracket (Optional[float]): Require the populated slice to
+                extend to at least ``min_bracket`` times the crossing lag,
+                else return ``nan``. An annulus whose lag range is truncated
+                by the grid edge or a mask (radial lags are one-sided, so the
+                outermost rings keep only a few short lags) can otherwise
+                "cross" in its last populated bin, against a plateau taken
+                from the other slice alone: whether it does is a coin flip on
+                one bin, and the lag it reports is set by the truncation, not
+                the field. ``2.0`` puts the crossing no further out than the
+                middle of the measured range. ``None`` disables the check
+                (the behaviour before it was added).
 
         Returns:
             float: the crossing lag in that axis's units (``nan`` if the
-            slice never reaches the level within the lag range).
+            slice never reaches the level within the lag range, or the
+            crossing is not bracketed per ``min_bracket``).
         """
         lags, s2 = self._populated_slice(axis)
         if plateau is None:
@@ -2649,8 +2662,25 @@ class StructureFunction:
             return float(lags[0])
         x0, x1, y0, y1 = lags[i - 1], lags[i], s2[i - 1], s2[i]
         if not np.isfinite(y0) or y1 == y0:
-            return float(x1)                       # nothing to interpolate from
-        return float(x0 + (target - y0) * (x1 - x0) / (y1 - y0))
+            lag = float(x1)                        # nothing to interpolate from
+        else:
+            lag = float(x0 + (target - y0) * (x1 - x0) / (y1 - y0))
+        if min_bracket is not None:
+            if self._populated_max_lag(axis) < min_bracket * lag:
+                return float("nan")
+        return lag
+
+    def _populated_max_lag(self, axis):
+        """Largest lag along ``axis`` with any contributing pairs.
+
+        The lag range an annulus actually measures, which falls short of
+        ``lags_x[-1]`` / ``lags_y[-1]`` wherever the slice runs off the grid
+        or into a mask (see :meth:`_populated_slice`). ``nan`` if no bin is
+        populated.
+        """
+        lags, s2 = self._populated_slice(axis)
+        ok = np.isfinite(s2)
+        return float(np.asarray(lags)[ok][-1]) if ok.any() else float("nan")
 
     def reliability_weight(self, kind="counts"):
         """Relative per-annulus reliability for weighting cross-annulus averages.
@@ -2688,7 +2718,10 @@ class StructureFunction:
             if not (np.isfinite(ell_r) and ell_r > 0
                     and np.isfinite(ell_phi_deg) and ell_phi_deg > 0):
                 return 0.0
-            n_r = self.lags_x[-1] / ell_r          # patches across the radial lag range
+            # patches across the radial lag range actually measured (not the
+            # nominal ``lags_x[-1]``, which would hand an edge-truncated
+            # annulus the largest weight in the stack)
+            n_r = self._populated_max_lag("x") / ell_r
             n_phi = 360.0 / ell_phi_deg            # patches around the full ring
             return float(max(n_r, 1.0) * max(n_phi, 1.0))
         raise ValueError("kind must be 'counts' or 'neff', got {!r}.".format(kind))
@@ -3860,7 +3893,8 @@ class StructureFunctionStack:
         """
         return np.array([r.plateau(frac=frac, stat=stat) for r in self.results])
 
-    def half_power_lags(self, axis="x", level=0.5, plateau=None):
+    def half_power_lags(self, axis="x", level=0.5, plateau=None,
+                        min_bracket=2.0):
         """Per-annulus half-power lag along ``axis``, shape ``(N_ref,)``.
 
         Maps :meth:`StructureFunction.half_power_lag` over the stack.
@@ -3875,12 +3909,15 @@ class StructureFunctionStack:
                 ``N_ref`` uses a per-ring value (e.g. from a previous
                 :meth:`StructureFunction.plateau` call). Defaults to
                 each ring's own :meth:`~StructureFunction.plateau`.
+            min_bracket (Optional[float]): passed to
+                :meth:`StructureFunction.half_power_lag`.
         """
         if plateau is None or np.ndim(plateau) == 0:
             plateaus = [plateau] * len(self.results)
         else:
             plateaus = list(plateau)
-        return np.array([r.half_power_lag(axis=axis, level=level, plateau=p)
+        return np.array([r.half_power_lag(axis=axis, level=level, plateau=p,
+                                          min_bracket=min_bracket)
                          for r, p in zip(self.results, plateaus)])
 
     def reliability_weights(self, kind="counts"):
@@ -3892,7 +3929,8 @@ class StructureFunctionStack:
         return np.array([r.reliability_weight(kind=kind) for r in self.results])
 
     def calculate_heuristics(self, r_min=None, r_max=None, t1c_arclength=True,
-                           rescale_returns=True, length_scale="kernel"):
+                           rescale_returns=True, length_scale="kernel",
+                           min_bracket=2.0):
         """Scalar heuristics characterising this structure-function stack.
 
         Six numbers summarising the field's amplitude, correlation lengths,
@@ -3932,6 +3970,13 @@ class StructureFunctionStack:
                 common rescaling of the lengths. Applies to the ``deg`` form
                 of T1c too (``t1c_arclength=False``), which takes the same
                 factor.
+            min_bracket (Optional[float]): passed to
+                :meth:`StructureFunction.half_power_lag`; a ring whose
+                crossing is not bracketed by its populated lag range drops
+                out of the averages and slopes. ``None`` restores the
+                behaviour before the check was added, under which the
+                outermost rings of a band ending at the grid edge could
+                report a spurious, heavily weighted short ``ell_r``.
             rescale_returns (bool): if ``True`` (default) return the
                 human-facing magnitudes ``sigma_hat = sqrt(T1a / 2)`` and
                 ``A_hat = exp(T2)``; if ``False`` return the raw statistics
@@ -3983,13 +4028,19 @@ class StructureFunctionStack:
         # larger (see the convention block at the top of this module). The
         # conversion is applied once, at the return, so that the neff weights
         # and the log-log slopes below keep operating on the raw lags.
-        hp_rs = self.half_power_lags('x', plateau=pls)      # radial lag [arcsec]
-        hp_ps_deg = self.half_power_lags('y', plateau=pls)  # azimuthal lag [deg]
+        hp_rs = self.half_power_lags('x', plateau=pls,       # radial lag [arcsec]
+                                     min_bracket=min_bracket)
+        hp_ps_deg = self.half_power_lags('y', plateau=pls,   # azimuthal lag [deg]
+                                         min_bracket=min_bracket)
         hp_ps_arc = np.radians(hp_ps_deg) * self.ref_rs     # azimuthal arc [arcsec]
 
         # Inline the neff formula from reliability_weight('neff') using the
         # half-power lags already computed above, avoiding 2N more plateau calls.
-        lags_x_max = np.array([r.lags_x[-1] for r in self.results])
+        # The radial range each ring actually measures: an edge-truncated
+        # ring keeps only its short lags, and the nominal ``lags_x[-1]``
+        # would give it the most patches (largest weight) in the stack.
+        lags_x_max = np.array([r._populated_max_lag('x')
+                               for r in self.results])
         n_r = lags_x_max / hp_rs
         n_phi = 360.0 / hp_ps_deg
         ok = (np.isfinite(hp_rs) & (hp_rs > 0)
