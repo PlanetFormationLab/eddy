@@ -101,8 +101,8 @@ class Annulus2D(Annulus):
         if self.vobs.shape != self.theta.shape:
             raise ValueError("Mismatch between vobs and pvals shapes.")
 
-    def get_vlos(self, fit_method='SHO', fit_vrad=True, fix_vlsr=None,
-                 optimize_kwargs=None):
+    def get_vlos(self, fit_method='SHO', fit_vrad=True, fit_vz=False,
+                 fix_vlsr=None, optimize_kwargs=None):
         """
         Fit a simple-harmonic-oscillator model to the observed pixel
         velocities. Mirrors :meth:`Annulus3D.get_vlos_SHO`: the fit is
@@ -113,26 +113,40 @@ class Annulus2D(Annulus):
         With ``A = vrot * |sin(i)|`` and ``B = -vrad * sin(i)``, positive
         ``vrad`` corresponds to motion *away* from the star.
 
+        The constant offset ``C = vlsr - vz * cos(i)`` is handled as follows:
+
+        - ``fix_vlsr=None`` (``fit_vz`` must be ``False``): ``C`` is free and
+          returned as ``vlsr`` (i.e., ``vz`` is assumed to be zero).
+        - ``fix_vlsr`` given, ``fit_vz=True``: ``C`` is free and converted to
+          ``vz = (vlsr - C) / cos(i)``.
+        - ``fix_vlsr`` given, ``fit_vz=False``: ``C`` is held fixed at
+          ``fix_vlsr`` and ``vz = 0`` (with zero uncertainty) is returned.
+
         Args:
             fit_method (Optional[str]): Only ``'SHO'`` is supported for 2D.
             fit_vrad (Optional[bool]): If ``True``, include a radial velocity
                 component in the fit. Default ``True``.
-            fix_vlsr (Optional[float]): If provided, treat the constant offset
-                as ``vlsr - vz * cos(i)`` and report ``vz`` instead of
-                ``vlsr``.
+            fit_vz (Optional[bool]): If ``True``, include a vertical velocity
+                component in the fit. Requires ``fix_vlsr`` as ``vz`` and
+                ``vlsr`` are otherwise degenerate. Default ``False``.
+            fix_vlsr (Optional[float]): Systemic velocity in [m/s]. See above
+                for how it interacts with ``fit_vz``.
             optimize_kwargs (Optional[dict]): Extra kwargs forwarded to
                 ``scipy.optimize.curve_fit``.
 
         Returns:
             popt, cvar (ndarray, ndarray): Best-fit deprojected velocities
                 and their uncertainties. Length 2 if ``fit_vrad=False``
-                (``[vrot, C-or-vz]``), length 3 if ``fit_vrad=True``
-                (``[vrot, vrad, C-or-vz]``).
+                (``[vrot, vlsr-or-vz]``), length 3 if ``fit_vrad=True``
+                (``[vrot, vrad, vlsr-or-vz]``).
         """
         if fit_method.upper() != 'SHO':
             raise NotImplementedError(
                 "Annulus2D currently only supports fit_method='SHO'."
             )
+        if fit_vz and fix_vlsr is None:
+            raise ValueError("`fit_vz=True` requires `fix_vlsr` to be set.")
+        fix_offset = fix_vlsr is not None and not fit_vz
 
         from .helper_functions import SHO, SHO_double
 
@@ -148,6 +162,19 @@ class Annulus2D(Annulus):
         C = vobs.mean() if vobs.size else 0.0
         p0 = [A, C] if not fit_vrad else [A, B, C]
 
+        # If the offset is fixed, drop C from the free parameters.
+
+        if fix_offset:
+            p0 = p0[:-1]
+            if fit_vrad:
+                def model(x, A, B):
+                    return SHO_double(x, A, B, fix_vlsr)
+            else:
+                def model(x, A):
+                    return SHO(x, A, fix_vlsr)
+        else:
+            model = SHO_double if fit_vrad else SHO
+
         kw = {} if optimize_kwargs is None else dict(optimize_kwargs)
         kw['p0'] = p0
         kw['sigma'] = sigma
@@ -155,8 +182,7 @@ class Annulus2D(Annulus):
         kw['maxfev'] = kw.pop('maxfev', 10000)
 
         try:
-            popt, pcov = curve_fit(SHO_double if fit_vrad else SHO,
-                                   theta, vobs, **kw)
+            popt, pcov = curve_fit(model, theta, vobs, **kw)
             cvar = np.sqrt(np.diag(pcov))
         except (TypeError, ValueError, RuntimeError):
             popt = np.full(len(p0), np.nan)
@@ -167,7 +193,10 @@ class Annulus2D(Annulus):
         if fit_vrad:
             popt[1] /= -self.sini
             cvar[1] /= abs(self.sini)
-        if fix_vlsr is not None:
+        if fix_offset:
+            popt = np.append(popt, 0.0)
+            cvar = np.append(cvar, 0.0)
+        elif fix_vlsr is not None:
             popt[-1] = (fix_vlsr - popt[-1]) / self.cosi
             cvar[-1] /= abs(self.cosi)
         return popt, cvar
