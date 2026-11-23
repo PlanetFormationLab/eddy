@@ -1,0 +1,238 @@
+/* ============================================================
+   eddy — Planet Formation Lab docs theme
+   Overrides for the "furo" Sphinx theme.
+   Palette & type from the PFL design system (pfl.mit.edu).
+   Tokens: dust orange #FF8A1F/#F26B0F/#C24E00, gas teal #136E7A,
+           paper #FBFAF7, space #06080F, TeX Gyre Heros + JetBrains Mono.
+   ============================================================ */
+
+/* ---------- Self-hosted fonts ----------
+   TeX Gyre Heros (GUST Font License) - an open Helvetica clone, standing in
+   for MIT's Neue Haas Grotesk. JetBrains Mono (SIL OFL). Licenses in fonts/. */
+@font-face { font-family:'TeX Gyre Heros'; font-style:normal; font-weight:400; font-display:swap; src:url('../fonts/texgyreheros-regular.woff2') format('woff2'); }
+@font-face { font-family:'TeX Gyre Heros'; font-style:italic; font-weight:400; font-display:swap; src:url('../fonts/texgyreheros-italic.woff2') format('woff2'); }
+@font-face { font-family:'TeX Gyre Heros'; font-style:normal; font-weight:700; font-display:swap; src:url('../fonts/texgyreheros-bold.woff2') format('woff2'); }
+@font-face { font-family:'TeX Gyre Heros'; font-style:italic; font-weight:700; font-display:swap; src:url('../fonts/texgyreheros-bolditalic.woff2') format('woff2'); }
+@font-face { font-family:'JetBrains Mono'; font-style:normal; font-weight:400; font-display:swap; src:url('../fonts/JetBrainsMono-Regular.woff2') format('woff2'); }
+@font-face { font-family:'JetBrains Mono'; font-style:italic; font-weight:400; font-display:swap; src:url('../fonts/JetBrainsMono-Italic.woff2') format('woff2'); }
+@font-face { font-family:'JetBrains Mono'; font-style:normal; font-weight:500; font-display:swap; src:url('../fonts/JetBrainsMono-Medium.woff2') format('woff2'); }
+@font-face { font-family:'JetBrains Mono'; font-style:normal; font-weight:700; font-display:swap; src:url('../fonts/JetBrainsMono-Bold.woff2') format('woff2'); }
+
+/* ---------- Brand tokens ---------- */
+:root {
+  --pfl-space-900:#06080F; --pfl-space-800:#0B0E18; --pfl-space-700:#121728;
+  --pfl-paper:#FBFAF7;
+  --pfl-n50:#F2F1EC; --pfl-n100:#E5E3DB; --pfl-n200:#CFCCC0; --pfl-n300:#ABA89B;
+  --pfl-n400:#7E7B70; --pfl-n500:#585548; --pfl-n700:#33312A; --pfl-n900:#1A1916;
+  --pfl-dust-50:#FFF0E2; --pfl-dust-200:#FFC07F; --pfl-dust-400:#FF8A1F;
+  --pfl-dust-500:#F26B0F; --pfl-dust-600:#C24E00;
+  --pfl-gas-50:#E1F4F6; --pfl-gas-200:#9BDDE3; --pfl-gas-400:#2FB4C2;
+  --pfl-gas-500:#1B93A2; --pfl-gas-600:#136E7A;
+  --pfl-mit-red:#A31F34;
+
+  /* Furo: type */
+  --font-stack:'TeX Gyre Heros', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-stack--headings:'TeX Gyre Heros', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-stack--monospace:'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Furo: geometry */
+  --sidebar-width:16rem;
+  --content-padding:1.5rem;
+  --admonition-font-size:0.9rem;
+  --admonition-title-font-size:0.8rem;
+}
+
+/* ---------- Light ("paper") ---------- */
+body {
+  --color-brand-primary:var(--pfl-dust-600);
+  --color-brand-content:var(--pfl-gas-600);
+  --color-brand-visited:var(--pfl-gas-600);
+
+  --color-background-primary:#FFFFFF;
+  --color-background-secondary:var(--pfl-paper);
+  --color-background-hover:#EDEBE4;
+  --color-background-hover--transparent:#EDEBE400;
+  --color-background-border:var(--pfl-n100);
+  --color-background-item:var(--pfl-n100);
+
+  --color-foreground-primary:var(--pfl-n900);
+  --color-foreground-secondary:var(--pfl-n500);
+  --color-foreground-muted:var(--pfl-n400);
+  --color-foreground-border:var(--pfl-n200);
+
+  --color-sidebar-background:#FFFFFF;
+  --color-sidebar-background-border:var(--pfl-n100);
+  --color-sidebar-brand-text:var(--pfl-n900);
+  --color-sidebar-caption-text:#DD5C0C;
+  --color-sidebar-link-text:var(--pfl-n500);
+  --color-sidebar-link-text--top-level:var(--pfl-n700);
+  --color-sidebar-item-background--current:transparent;
+  --color-sidebar-item-background--hover:var(--pfl-n50);
+  --color-sidebar-item-expander-background--hover:var(--pfl-n50);
+  --color-sidebar-search-border:var(--pfl-n100);
+  --color-sidebar-search-icon:var(--pfl-n300);
+
+  --color-toc-title-text:#DD5C0C;
+  --color-toc-item-text:var(--pfl-n400);
+  --color-toc-item-text--active:var(--pfl-n900);
+
+  --color-code-background:#FFFFFF;
+  --color-code-foreground:var(--pfl-n700);
+  --color-inline-code-background:var(--pfl-n50);
+
+  --color-api-background:var(--pfl-n50);
+  --color-api-background-hover:#EDEBE4;
+  --color-api-name:var(--pfl-n900);
+  --color-api-pre-name:var(--pfl-n400);
+  --color-api-paren:var(--pfl-n300);
+  --color-api-keyword:var(--pfl-dust-600);
+  --color-highlight-on-target:var(--pfl-dust-50);
+
+  --color-admonition-title--note:var(--pfl-gas-500);
+  --color-admonition-title-background--note:var(--pfl-gas-50);
+  --color-admonition-title--tip:var(--pfl-gas-500);
+  --color-admonition-title-background--tip:var(--pfl-gas-50);
+  --color-admonition-title--warning:var(--pfl-dust-500);
+  --color-admonition-title-background--warning:var(--pfl-dust-50);
+  --color-admonition-title--important:var(--pfl-dust-600);
+  --color-admonition-title-background--important:var(--pfl-dust-50);
+
+  --color-table-header-background:var(--pfl-n50);
+  --color-table-border:var(--pfl-n100);
+}
+
+/* Single ("paper") mode only — furo's light/dark toggle is hidden. */
+.theme-toggle-container, .theme-toggle { display:none !important; }
+
+/* ---------- Typography ---------- */
+article h1, article h2, article h3, article h4, article h5, article h6,
+.sidebar-brand-text, .toc-title {
+  font-family:var(--font-stack--headings);
+  font-weight:700;
+}
+article h1 { font-size:2.441rem; line-height:1.08; letter-spacing:-.02em; margin:0 0 .5em; }
+article h2 { font-size:1.5625rem; line-height:1.15; letter-spacing:-.015em; margin-top:2.2em; }
+article h3 { font-size:1.25rem; line-height:1.25; letter-spacing:-.01em; margin-top:1.8em; }
+article h4 { font-size:1rem; letter-spacing:0; }
+article p, article li { line-height:1.55; }
+article { font-size:1rem; }
+.content, article { max-width:74ch; text-wrap:pretty; }
+
+/* Headerlink: amber, only on hover */
+a.headerlink { color:var(--pfl-dust-500); font-weight:400; }
+
+/* Section captions in the sidebar + on-page TOC title: small bold caps */
+.sidebar-tree .caption, .toc-title {
+  font-family:var(--font-stack--headings);
+  font-size:.8125rem;
+  font-weight:700;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}
+
+/* Links: faint underline that solidifies on hover (PFL rule) */
+article a.reference.external,
+article a.reference.internal:not(.toc-backref) {
+  text-decoration:underline;
+  text-decoration-color:color-mix(in srgb, currentColor 30%, transparent);
+  text-underline-offset:.15em;
+  transition:text-decoration-color 220ms cubic-bezier(.4,0,.2,1);
+}
+article a:hover { text-decoration-color:currentColor; }
+
+/* Current sidebar page marked with an amber rule, not a fill */
+.sidebar-tree .current-page > .reference {
+  color:var(--color-foreground-primary);
+  font-weight:500;
+  box-shadow:inset 2px 0 0 var(--pfl-dust-400);
+}
+
+/* ---------- Sidebar brand lockup ---------- */
+/* Logo and "eddy" side by side at the left, on one centred row */
+.sidebar-brand, .sidebar-brand.centered {
+  flex-direction:row; align-items:center; justify-content:flex-start;
+  gap:.75rem; padding-bottom:.25rem;
+}
+.sidebar-logo { max-width:2.25rem; margin:0; display:block; }
+.sidebar-logo-container { margin:0; flex:none; }
+.sidebar-brand-text { font-size:1.25rem; letter-spacing:-.01em; line-height:1; text-align:left; }
+
+/* Search pinned at the foot of the sidebar: rule above instead of below */
+.sidebar-sticky > .sidebar-search-container {
+  border-top:1px solid var(--color-sidebar-search-border);
+  border-bottom:none;
+}
+
+/* ---------- Code ---------- */
+.highlight { border:1px solid var(--color-background-border); border-radius:8px; }
+.highlight pre { padding:.9rem 1.1rem; font-size:.8125rem; line-height:1.7; }
+code.literal { border-radius:4px; font-size:.85em; padding:.1em .3em; border:none; }
+
+/* ---------- API signatures ---------- */
+dl.py > dt.sig {
+  border-radius:8px;
+  border:1px solid var(--color-background-border);
+  border-left:2px solid var(--pfl-dust-400);
+  padding:.55rem .8rem;
+  font-family:var(--font-stack--monospace);
+  font-size:.875rem;
+}
+dl.py .sig-name { font-weight:600; }
+
+/* ---------- Media ---------- */
+article img { border-radius:14px; }
+article figure figcaption, article .caption-text {
+  font-family:var(--font-stack);
+  font-size:.8125rem;
+  color:var(--color-foreground-muted);
+}
+
+/* ---------- Admonitions & tables ---------- */
+.admonition, div.topic { border-radius:8px; box-shadow:none; border:1px solid var(--color-background-border); }
+.admonition > .admonition-title {
+  font-family:var(--font-stack--headings); font-weight:700;
+  letter-spacing:.06em; text-transform:uppercase;
+}
+table.docutils { border-radius:8px; overflow:hidden; border:1px solid var(--color-table-border); }
+table.docutils th { font-family:var(--font-stack--headings); font-weight:700; }
+
+/* ---------- Focus (MIT a11y) ---------- */
+:focus-visible { outline:2px solid var(--pfl-gas-400); outline-offset:2px; }
+
+/* ---------- Landing hero (index page only) ---------- */
+.eddy-lede {
+  color:var(--color-foreground-secondary); font-size:1.25rem; line-height:1.45;
+  max-width:46ch; margin:0 0 1.6rem;
+}
+.eddy-actions { display:flex; flex-wrap:wrap; gap:.75rem; align-items:center; margin:0 0 2.5rem; }
+.eddy-btn {
+  display:inline-block; padding:.6rem 1.15rem; border-radius:8px;
+  font-size:.9375rem; font-weight:500; text-decoration:none !important;
+  transition:background 220ms cubic-bezier(.4,0,.2,1), transform 220ms cubic-bezier(.4,0,.2,1);
+}
+.eddy-btn--primary { background:var(--pfl-dust-50); border:1px solid var(--pfl-dust-200); color:var(--pfl-dust-600) !important; }
+.eddy-btn--primary:hover { background:#FFE3CC; border-color:var(--pfl-dust-400); }
+.eddy-btn--ghost { border:1px solid var(--color-foreground-border); color:var(--color-foreground-primary) !important; }
+.eddy-btn--ghost:hover { background:var(--color-background-hover, rgba(0,0,0,.04)); }
+.eddy-btn:active { transform:scale(.98); }
+.eddy-actions .literal { border-radius:4px; padding:.35rem .6rem; font-size:.875rem; }
+@media (max-width:67em) {
+  .eddy-lede { font-size:1.0625rem; }
+}
+@media (prefers-reduced-motion:reduce) { * { transition:none !important; animation:none !important; } }
+
+/* ---------- Figure frame + the deprojection demo ---------- */
+.eddy-figure {
+  border:1px solid var(--color-background-border);
+  border-radius:14px; overflow:hidden; background:#FFFFFF; margin:1.5rem 0;
+}
+.eddy-figure > .eddy-figure-body { padding:1.25rem 1.4rem 1.1rem; }
+.eddy-figure > .eddy-figure-caption {
+  padding:.75rem 1rem; border-top:1px solid var(--color-background-border);
+  background:var(--pfl-paper);
+  font-family:var(--font-stack); font-size:.8125rem; line-height:1.5;
+  color:var(--color-foreground-muted);
+}
+eddy-deprojection { display:block; }
+eddy-deprojection .ed-play:hover { background:var(--pfl-n50); }
+eddy-deprojection .ed-play:active { transform:scale(.98); }

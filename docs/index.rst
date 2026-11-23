@@ -1,8 +1,16 @@
 eddy - Extracting Disk Dynamics
 ===============================
 
-*eddy* provides a suite of tools to extract kinematical information from
-spatially and spectrally resolved line data.
+.. raw:: html
+
+   <p class="eddy-lede">Fit Keplerian rotation patterns to spatially and
+      spectrally resolved line data — and measure the gas motions that give
+      away a forming planet.</p>
+   <div class="eddy-actions">
+     <a class="eddy-btn eddy-btn--primary" href="#installation">Install eddy</a>
+     <a class="eddy-btn eddy-btn--ghost" href="tutorials/tutorial_0.html">Start the tutorials</a>
+     <code class="literal">pip install astro-eddy</code>
+   </div>
 
 The :class:`eddy.rotationmap.rotationmap` class enables the fitting of a Keplerian
 rotation pattern to a rotation map to infer geometrical properties of the disk,
@@ -33,15 +41,25 @@ Contents
 
 .. toctree::
    :maxdepth: 2
-   :caption: Tutorials
+   :caption: Velocity Maps
 
    tutorials/tutorial_0
    tutorials/tutorial_1
    tutorials/tutorial_2
-   tutorials/tutorial_3
-   tutorials/tutorial_4
    tutorials/tutorial_5
    tutorials/tutorial_6_numpyro
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Annuli
+
+   tutorials/tutorial_3
+   tutorials/tutorial_4
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Structure Functions
+
    tutorials/tutorial_7_structurefunction
 
 .. toctree::
