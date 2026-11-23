@@ -267,12 +267,13 @@ class rotationmap(momentmap):
                 # emcee 3.x deprecates sampler.chain in favour of get_chain;
                 # transpose (nsteps, nwalkers, ndim) -> (ndim, nsteps, nwalkers)
                 walkers = np.transpose(sampler.get_chain(), (2, 0, 1))
-            else:
-                # zeus and the numpyro adapter expose a writable .chain;
-                # zeus.chain is (nsteps, nwalkers, ndim) and the adapter is
-                # (num_chains, total_steps, ndim) -- both reduce to
-                # (ndim, ..., nwalkers/num_chains) via rollaxis(2).
+            elif mcmc == 'zeus':
+                # zeus: (nsteps, nwalkers, ndim) -> (ndim, nsteps, nwalkers)
                 walkers = np.rollaxis(sampler.chain.copy(), 2)
+            else:
+                # numpyro adapter: (num_chains, total_steps, ndim)
+                # -> (ndim, total_steps, num_chains)
+                walkers = sampler.chain.T
             plot_walkers(walkers, nburnin[-1], labels)
         if 'corner' in plots:
             plot_corner(samples, labels)
