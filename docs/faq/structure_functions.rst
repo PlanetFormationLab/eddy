@@ -1,9 +1,9 @@
 Structure Functions FAQ
 =======================
 
-Common questions about the :mod:`eddy.structurefunction` module. For a
-walkthrough, see the
-:doc:`structure function tutorial </tutorials/tutorial_7_structurefunction>`.
+Common questions about the :mod:`eddy.structurefunction` module. A
+worked :doc:`structure function tutorial </tutorials/structure_functions_coming_soon>`
+is coming soon.
 
 
 What does the module compute?

@@ -53,7 +53,10 @@ nbsphinx_requirejs_path = ''
 
 templates_path = ['_templates']
 master_doc = 'index'
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+# The structure function tutorial is being revised; a coming-soon page stands
+# in for it in the toctree until it is ready to publish.
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store',
+                    'tutorials/tutorial_7_structurefunction.ipynb']
 add_function_parentheses = True
 
 # -- HTML output — Planet Formation Lab brand --------------------------------

@@ -6,6 +6,7 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.11"
+    nodejs: "20"      # sphinxcontrib-katex prerenders math with node
   apt_packages:
     - pandoc          # nbsphinx needs the real pandoc binary
 

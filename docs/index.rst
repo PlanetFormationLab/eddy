@@ -61,7 +61,7 @@ Contents
    :caption: Structure Functions
 
    faq/structure_functions
-   tutorials/tutorial_7_structurefunction
+   tutorials/structure_functions_coming_soon
 
 
 Support
