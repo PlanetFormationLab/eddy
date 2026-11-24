@@ -1694,11 +1694,11 @@ class imagecube(object):
         # Averaging.
 
         if percentiles:
-            rstat = np.array([np.nabpercentile(toavg[ridxs == r], [16, 50, 84])
+            rstat = np.array([np.nanpercentile(toavg[ridxs == r], [16, 50, 84])
                               for r in range(1, rbins.size)]).T
             ravgs = rstat[1]
             rstds = np.array([rstat[1] - rstat[0], rstat[2] - rstat[1]])
-            rstds /= np.sqrt(nbeams)[None, :]
+            rstds /= np.sqrt(nbeams)
         else:
             ravgs = np.array([np.nanmean(toavg[ridxs == r])
                               for r in range(1, rbins.size)])
