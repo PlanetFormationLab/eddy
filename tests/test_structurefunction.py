@@ -336,7 +336,8 @@ def test_plateau_and_half_power_lag_ignore_unpopulated_bins():
     old_plateau = _old_pooled_plateau(res)
     assert old_plateau < 0.6 * plateau_before
     assert res.half_power_lag("y", plateau=old_plateau) < 0.75 * ell_phi_before
-    assert res.half_power_lag("x", plateau=old_plateau) < 0.75 * ell_r_before
+    assert (res.half_power_lag("x", plateau=old_plateau, min_bracket=None)
+            < 0.75 * ell_r_before)
 
     # The emptied bins are excluded, not read as zeros ...
     _, s2_x = res._populated_slice("x")
@@ -366,6 +367,81 @@ def test_heuristics_unchanged_when_outer_annuli_lose_their_largest_lags():
     T1b_d, T3_d = damaged.calculate_heuristics()[1], damaged.calculate_heuristics()[4]
     assert T1b_d == pytest.approx(T1b_p, rel=0.05)
     assert T3_d == pytest.approx(T3_p, abs=0.05)
+
+
+def _truncate_to_edge_ring(res, keep_x=2, over=1.05):
+    """Emulate the outermost ring of a band that ends at the grid edge.
+
+    Radial lags are one-sided, so the ring keeps only its first ``keep_x``
+    radial bins -- far short of its correlation length -- and the plateau
+    comes off the intact azimuthal slice alone. Its radial S_2 is scaled so
+    the last surviving bin sits just ``over`` the half-power level (outer-ring
+    radial noise above the azimuthal plateau): the "crossing" is then the
+    last bin, a short lag set by the truncation rather than the field.
+    """
+    _empty_the_largest_lags(res, keep_x=keep_x)
+    target = 0.5 * res.plateau()
+    res.S2_x[:keep_x] *= over * target / res.S2_x[keep_x - 1]
+
+
+def test_half_power_lag_rejects_unbracketed_crossing():
+    """A ring whose radial slice stops at its own crossing has no measured
+    range beyond it: the lag must be NaN, not whatever the last bin says,
+    and its n_eff weight must reflect the lags it actually measured."""
+    field = _smoothed_polar_field(n_r=100, n_phi=400)
+    dx, dy = 0.05, 3.0
+    x_axis = 0.5 + np.arange(field.shape[0]) * dx
+    stack = StructureFunctionStack.calculate(
+        field, ref_rs=[1.5], x_axis=x_axis, dx=dx, dy=dy,
+        ref_band=0.05, max_lag_x=40, max_lag_y=40, n_bins=25,
+    )
+    res = stack.results[0]
+    ell_r = res.half_power_lag("x")
+    assert np.isfinite(ell_r) and res.reliability_weight("neff") > 0
+    _truncate_to_edge_ring(res)
+
+    # Without the check: a finite lag from the last populated bin, well
+    # short of the field's own ...
+    short = res.half_power_lag("x", min_bracket=None)
+    assert np.isfinite(short) and short < 0.5 * ell_r
+    # ... now censored, and with it the ring's n_eff weight.
+    assert np.isnan(res.half_power_lag("x"))
+    assert res.reliability_weight("neff") == 0.0
+    # The azimuthal slice is intact, so its lag is unaffected.
+    assert res.half_power_lag("y") == pytest.approx(
+        res.half_power_lag("y", min_bracket=None))
+    assert res._populated_max_lag("x") < res.lags_x[-1]
+
+
+def test_heuristics_ignore_edge_rings_truncated_at_their_crossing():
+    """Stationary field; the two outermost rings are edge rings (a few
+    radial bins, the last just crossing half power). Before the bracketing
+    check they reported a short ell_r and -- weighted by the nominal lag
+    range over that short ell_r -- pulled the band, manufacturing T3 < 0
+    and A_hat > 1. With it they drop out, and the heuristics are those of
+    the undamaged stack over the remaining rings."""
+    field = _smoothed_polar_field(n_r=120, n_phi=140)
+    dx, dy = 0.05, 3.0
+    x_axis = 0.5 + np.arange(field.shape[0]) * dx
+    ref_rs = np.linspace(1.0, 5.5, 10)
+    kw = dict(ref_rs=ref_rs, x_axis=x_axis, dx=dx, dy=dy,
+              ref_band=0.05, max_lag_x=25, max_lag_y=30, n_bins=25)
+    pristine = StructureFunctionStack.calculate(field, **kw)
+    damaged = StructureFunctionStack.calculate(field, **kw)
+    for res in damaged.results[-2:]:
+        _truncate_to_edge_ring(res)
+
+    r_max = 0.5 * (ref_rs[-3] + ref_rs[-2])
+    h_p = np.array(pristine.calculate_heuristics(r_max=r_max))
+    h_d = np.array(damaged.calculate_heuristics())
+    h_old = np.array(damaged.calculate_heuristics(min_bracket=None))
+    # T1a pools every ring's plateau, so it moves slightly; the rest match.
+    np.testing.assert_allclose(h_d[1:], h_p[1:], rtol=1e-10, atol=1e-12)
+    # The regression being guarded: the edge rings pull ell_r down and T3
+    # negative, and inflate the anisotropy.
+    assert h_old[1] < 0.97 * h_p[1]
+    assert h_old[3] > 1.1 * h_p[3]
+    assert h_old[4] < h_p[4] - 0.2
 
 
 def test_populated_slice_rejects_bad_axis():
