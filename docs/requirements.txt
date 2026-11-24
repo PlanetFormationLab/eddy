@@ -1,6 +1,8 @@
-sphinx>=1.7.5
+sphinx>=7.0
+furo>=2024.1.29
+sphinx-copybutton
+sphinxcontrib-katex
 pandoc
 jupyter
 nbsphinx
 pygments>=2.4.1
-sphinx_rtd_theme

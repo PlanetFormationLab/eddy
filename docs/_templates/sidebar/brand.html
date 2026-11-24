@@ -1,0 +1,16 @@
+{#- eddy · PFL sidebar brand lockup (overrides furo's sidebar/brand.html) -#}
+<a class="sidebar-brand{% if logo %} centered{% endif %}" href="{{ pathto(master_doc) }}">
+  {% block brand_content %}
+  {%- if logo_url %}
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo" src="{{ logo_url }}" alt="eddy mark"/>
+  </div>
+  {%- endif %}
+  {%- if theme_light_logo %}
+  <div class="sidebar-logo-container">
+    <img class="sidebar-logo" src="{{ pathto('_static/' + theme_light_logo, 1) }}" alt="eddy mark"/>
+  </div>
+  {%- endif %}
+  <span class="sidebar-brand-text">{{ docstitle if docstitle else project }}</span>
+  {% endblock brand_content %}
+</a>
