@@ -47,6 +47,10 @@ def _gaussian_stack(ell_r=0.10, ell_phi=0.10, sigma=1.0,
         sf.lags_x, sf.lags_y = lags_x, lags_y
         sf.S2_x = 2 * sigma**2 * (1 - np.exp(-lags_x**2 / (2 * ell_r**2)))
         sf.S2_y = 2 * sigma**2 * (1 - np.exp(-arc**2 / (2 * ell_phi**2)))
+        # Fully populated pair counts, so the slice masking and the
+        # populated-lag-range weights see every bin.
+        sf.S2 = np.zeros((2 * lags_x.size - 1, 2 * lags_y.size - 1))
+        sf.counts = np.ones_like(sf.S2, dtype=int)
         results.append(sf)
     return results, ref_rs
 
@@ -59,7 +63,7 @@ def test_heuristic_ell_matches_kernel_ell(monkeypatch):
     stack = StructureFunctionStack.__new__(StructureFunctionStack)
     stack.results, stack.ref_rs = results, np.asarray(ref_rs)
 
-    def fake_hp(axis="x", plateau=None):
+    def fake_hp(axis="x", plateau=None, min_bracket=None):
         base = ell_r if axis == "x" else ell_phi
         n = len(ref_rs)
         if axis == "x":
