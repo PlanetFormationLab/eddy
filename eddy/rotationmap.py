@@ -321,7 +321,8 @@ class rotationmap(momentmap):
                    q_taper=1.0, z_func=None, shadowed=False, phi_min=None,
                    phi_max=None, exclude_phi=False, abs_phi=False,
                    mask_frame='disk', user_mask=None, fit_vrad=True,
-                   fix_vlsr=None, beam_spacing=0, niter=1, plots=None,
+                   fit_vz=False, fix_vlsr=None, beam_spacing=0, niter=1,
+                   plots=None,
                    returns=None, optimize_kwargs=None, MCMC=False):
         r"""
         Splits the map into concentric annuli based on the geometrical
@@ -377,9 +378,17 @@ class rotationmap(momentmap):
             user_mask (Optional[ndarray]): A 2D mask to use.
             fit_vrad (Optional[bool]): Whether to include radial velocities in
                 the fit. Default is ``True``.
-            fix_vlsr (Optional[float]): Fix the systemic velocity to this value
-                such that returned velocity component is the deprojected
-                vertical velocity.
+            fit_vz (Optional[bool]): Whether to include vertical velocities in
+                the fit. As :math:`v_{\rm z}` and :math:`v_{\rm lsr}` are
+                degenerate, this requires ``fix_vlsr`` to be set. Default is
+                ``False``.
+            fix_vlsr (Optional[float]): The systemic velocity in [m/s]. If
+                ``fit_vz=True``, the fitted constant offset is converted to a
+                deprojected vertical velocity using this value. If
+                ``fit_vz=False``, the systemic velocity is held fixed at this
+                value in the fit and :math:`v_{\rm z} = 0`. If not provided,
+                the systemic velocity is fit for in each annulus and
+                :math:`v_{\rm z} = 0` is assumed.
             beam_spacing (Optional[int/float]): If provided, sample pixels that
                 are roughly this fraction of a beam separated.
             niter (Optional[int]): Run ``niter`` iterations. Should only be
@@ -396,6 +405,9 @@ class rotationmap(momentmap):
         """
 
         # Remove possbility to run niter > 1 with beam_spacing = 0.
+
+        if fit_vz and fix_vlsr is None:
+            raise ValueError("`fit_vz=True` requires `fix_vlsr` to be set.")
 
         if niter > 1 and beam_spacing == 0:
             print("WARNING: Can't run multiple iterations using all pixels.")
@@ -472,6 +484,7 @@ class rotationmap(momentmap):
                 try:
                     popt, cvar = ann.get_vlos(fit_method='SHO',
                                               fit_vrad=fit_vrad,
+                                              fit_vz=fit_vz,
                                               fix_vlsr=fix_vlsr,
                                               optimize_kwargs=optimize_kwargs)
                 except ValueError:
