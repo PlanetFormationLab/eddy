@@ -198,7 +198,7 @@ table.docutils th { font-family:var(--font-stack--headings); font-weight:700; }
 /* ---------- Landing hero (index page only) ---------- */
 .eddy-lede {
   color:var(--color-foreground-secondary); font-size:1.25rem; line-height:1.45;
-  max-width:46ch; margin:0 0 1.6rem;
+  margin:0 0 1.6rem;
 }
 .eddy-actions { display:flex; flex-wrap:wrap; gap:.75rem; align-items:center; margin:0 0 2.5rem; }
 .eddy-btn {
