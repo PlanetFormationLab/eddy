@@ -2,7 +2,10 @@
 
 <p align='center'>
   <br/>
-  <img src="https://github.com/PlanetFormationLab/eddy/blob/master/docs/_static/eddy_logo.png" width="500" height="500">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/PlanetFormationLab/eddy/master/docs/_static/eddy_logo_dark.png">
+    <img src="https://raw.githubusercontent.com/PlanetFormationLab/eddy/master/docs/_static/eddy_logo_light.png" alt="eddy" width="500" height="500">
+  </picture>
   <br/>
   <br/>
   <a href="https://pypi.org/project/astro-eddy/"><img src="https://img.shields.io/pypi/v/astro-eddy.svg" alt="PyPI version" />
