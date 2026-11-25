@@ -1,5 +1,5 @@
-Annuli FAQ
-==========
+Velocity Profiles FAQ
+=====================
 
 Common questions about extracting velocities from annuli of spectra with
 :class:`eddy.linecube.linecube` and :class:`eddy.annulus.annulus`. For a

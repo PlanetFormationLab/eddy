@@ -1,5 +1,5 @@
-Velocity Maps FAQ
-=================
+Fitting Rotation Maps FAQ
+=========================
 
 Common questions about fitting rotation maps with
 :class:`eddy.rotationmap.rotationmap`. For a walkthrough, start with

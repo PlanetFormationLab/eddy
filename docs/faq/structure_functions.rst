@@ -1,5 +1,5 @@
-Structure Functions FAQ
-=======================
+Velocity Fluctuations FAQ
+=========================
 
 Common questions about the :mod:`eddy.structurefunction` module. A
 worked :doc:`structure function tutorial </tutorials/structure_functions_coming_soon>`

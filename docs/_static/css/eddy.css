@@ -29,7 +29,11 @@
   --pfl-gas-50:#E1F4F6; --pfl-gas-200:#9BDDE3; --pfl-gas-400:#2FB4C2;
   --pfl-gas-500:#1B93A2; --pfl-gas-600:#136E7A;
   --pfl-mit-red:#A31F34;
+}
 
+/* Furo sets its type and geometry variables on body, so they must be
+   overridden there too: on :root they lose to furo's own values. */
+body {
   /* Furo: type */
   --font-stack:'TeX Gyre Heros', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --font-stack--headings:'TeX Gyre Heros', 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -69,8 +73,6 @@ body {
   --color-sidebar-item-background--current:transparent;
   --color-sidebar-item-background--hover:var(--pfl-n50);
   --color-sidebar-item-expander-background--hover:var(--pfl-n50);
-  --color-sidebar-search-border:var(--pfl-n100);
-  --color-sidebar-search-icon:var(--pfl-n300);
 
   --color-toc-title-text:#DD5C0C;
   --color-toc-item-text:var(--pfl-n400);
@@ -156,12 +158,6 @@ article a:hover { text-decoration-color:currentColor; }
 .sidebar-logo { max-width:2.25rem; margin:0; display:block; }
 .sidebar-logo-container { margin:0; flex:none; }
 .sidebar-brand-text { font-size:1.25rem; letter-spacing:-.01em; line-height:1; text-align:left; }
-
-/* Search pinned at the foot of the sidebar: rule above instead of below */
-.sidebar-sticky > .sidebar-search-container {
-  border-top:1px solid var(--color-sidebar-search-border);
-  border-bottom:none;
-}
 
 /* ---------- Code ---------- */
 .highlight { border:1px solid var(--color-background-border); border-radius:8px; }
