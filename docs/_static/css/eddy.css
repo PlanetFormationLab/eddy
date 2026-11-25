@@ -66,7 +66,7 @@ body {
 
   --color-sidebar-background:#FFFFFF;
   --color-sidebar-background-border:var(--pfl-n100);
-  --color-sidebar-brand-text:var(--pfl-n900);
+  --color-sidebar-brand-text:var(--pfl-n700);
   --color-sidebar-caption-text:#DD5C0C;
   --color-sidebar-link-text:var(--pfl-n500);
   --color-sidebar-link-text--top-level:var(--pfl-n700);
