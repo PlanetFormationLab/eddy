@@ -41,27 +41,27 @@ Contents
 
 .. toctree::
    :maxdepth: 2
-   :caption: Velocity Maps
+   :caption: Fitting Rotation Maps
 
-   faq/velocity_maps
    tutorials/tutorial_1
    tutorials/tutorial_2
    tutorials/tutorial_5
+   FAQ <faq/velocity_maps>
 
 .. toctree::
    :maxdepth: 2
-   :caption: Annuli
+   :caption: Velocity Profiles
 
-   faq/annuli
    tutorials/tutorial_3
    tutorials/tutorial_4
+   FAQ <faq/annuli>
 
 .. toctree::
    :maxdepth: 2
-   :caption: Structure Functions
+   :caption: Velocity Fluctuations
 
-   faq/structure_functions
    tutorials/structure_functions_coming_soon
+   FAQ <faq/structure_functions>
 
 
 Support

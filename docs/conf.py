@@ -69,9 +69,12 @@ html_js_files = ['js/eddy-deprojection.js']
 html_favicon = '_static/favicon.png'
 html_show_sourcelink = False
 
-# Pygments: warm-neutral on paper. 'friendly' reads closest to the
-# PFL palette out of the shipped styles.
-pygments_style = 'friendly'
+# Pygments: a custom style in the PFL palette (docs/_pygments/pfl.py),
+# importable because this directory is on sys.path above.
+pygments_style = '_pygments.pfl.PFLStyle'
+# Furo still emits a dark code style for OS dark mode even though the rest
+# of the page stays light, so point it at the same style.
+pygments_dark_style = '_pygments.pfl.PFLStyle'
 
 # Light ("paper") only. Furo always ships a toggle, so the dark
 # variables are set to the light values and the toggle is hidden in
@@ -86,8 +89,7 @@ _PFL = {
     'color-sidebar-background': '#FFFFFF',
 }
 
-# Search sits at the foot of the left sidebar, below the navigation tree,
-# rather than under the brand (furo's default order otherwise).
+# No search box: furo's sidebar/search.html is left out of the sidebar.
 html_sidebars = {
     '**': [
         'sidebar/brand.html',
@@ -95,7 +97,6 @@ html_sidebars = {
         'sidebar/navigation.html',
         'sidebar/ethical-ads.html',
         'sidebar/scroll-end.html',
-        'sidebar/search.html',
         'sidebar/variant-selector.html',
     ]
 }
